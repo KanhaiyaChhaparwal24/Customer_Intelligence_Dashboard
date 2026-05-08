@@ -411,15 +411,93 @@ def get_payment_methods(db: Session) -> List[Dict]:
 
 
 def get_customer_journey(db: Session, email: str) -> Dict:
-    """Build a customer journey timeline for a converted customer."""
+    """
+    Build a customer journey timeline for a converted customer.
+    Journey includes:
+    1. Flipkart purchases (from ProcessedRow.email → InvoiceExtraction.row_number)
+    2. D2C orders (from ShopifyOrder.email)
+    Sorted chronologically.
+    """
     norm = norm_email(email)
 
-    fk_invoices = (
-        db.query(InvoiceExtraction)
-        .filter(InvoiceExtraction.email == norm)
-        .order_by(InvoiceExtraction.invoice_date)
+    def _parse_date(value: Optional[str]):
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+
+        for fmt in (
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%d %b %Y",
+            "%d %B %Y",
+            "%Y/%m/%d",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                return datetime.strptime(text[:len(fmt)], fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _invoice_score(inv: InvoiceExtraction) -> int:
+        score = 0
+        if inv.invoice_number:
+            score += 30
+        if inv.order_id:
+            score += 25
+        if inv.product_title:
+            score += 15
+        if inv.grand_total is not None:
+            score += 20
+        if inv.invoice_date:
+            score += 10
+        if inv.file_id:
+            score += 5
+        return score
+
+    # ── Step 1: Get warranty rows (authoritative email source) ────────────
+    warranty_rows = (
+        db.query(ProcessedRow)
+        .filter(ProcessedRow.email == norm)
         .all()
     )
+    warranty_row_numbers = [r.sheet_row_number for r in warranty_rows]
+
+    # ── Step 2: Get Flipkart invoices linked via row_number ──────────────
+    fk_invoices = []
+    if warranty_row_numbers:
+        fk_invoices = (
+            db.query(InvoiceExtraction)
+            .filter(InvoiceExtraction.row_number.in_(warranty_row_numbers))
+            .order_by(InvoiceExtraction.row_number.asc(), InvoiceExtraction.extracted_at.desc())
+            .all()
+        )
+
+    # Keep only the best extraction per warranty row and skip blank noise rows.
+    fk_best_by_row: Dict[int, InvoiceExtraction] = {}
+    for inv in fk_invoices:
+        if not any([
+            inv.product_title,
+            inv.invoice_number,
+            inv.order_id,
+            inv.grand_total is not None,
+            inv.invoice_date,
+        ]):
+            continue
+
+        current = fk_best_by_row.get(inv.row_number)
+        if current is None or _invoice_score(inv) > _invoice_score(current):
+            fk_best_by_row[inv.row_number] = inv
+
+    # ── Step 3: Get D2C orders by email ──────────────────────────────────
     d2c_orders = (
         db.query(ShopifyOrder)
         .filter(ShopifyOrder.email == norm)
@@ -427,25 +505,55 @@ def get_customer_journey(db: Session, email: str) -> Dict:
         .all()
     )
 
+    # ── Build timeline ──────────────────────────────────────────────────────
     events = []
-    for inv in fk_invoices:
+    
+    # Add Flipkart purchases
+    for inv in sorted(
+        fk_best_by_row.values(),
+        key=lambda item: (
+            _parse_date(item.invoice_date) or datetime.max,
+            item.row_number or 0,
+        ),
+    ):
         events.append({
             "type": "flipkart_purchase",
-            "date": inv.invoice_date,
+            "date": inv.invoice_date or "",
             "product": inv.product_title,
             "amount": inv.grand_total,
+            "platform": "Flipkart",
+            "invoice_number": inv.invoice_number,
         })
-    for order in d2c_orders:
+    
+    # Add D2C orders
+    for order in sorted(
+        d2c_orders,
+        key=lambda item: _parse_date(item.created_at) or datetime.max,
+    ):
         events.append({
             "type": "d2c_order",
-            "date": order.created_at,
+            "date": order.created_at or "",
             "product": order.product,
             "amount": order.total,
             "order_id": order.order_id,
+            "platform": "D2C",
         })
 
-    events.sort(key=lambda x: x.get("date") or "")
-    return {"email": norm, "events": events}
+    # Sort chronologically
+    events.sort(
+        key=lambda item: (
+            _parse_date(item.get("date")) or datetime.max,
+            0 if item.get("type") == "flipkart_purchase" else 1,
+        )
+    )
+    
+    return {
+        "email": norm,
+        "customer_name": warranty_rows[0].email if warranty_rows else email,
+        "events": events,
+        "flipkart_count": len(fk_best_by_row),
+        "d2c_count": len(d2c_orders),
+    }
 
 
 def get_invoices_list(db: Session, page: int = 1, per_page: int = 50) -> Dict:

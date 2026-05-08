@@ -79,7 +79,11 @@ def stream_file_to_memory(file_id: str) -> Tuple[bytes, str, str]:
     Stream a Drive file into memory WITHOUT writing to disk.
     Returns (bytes, mime_type, filename).
     Caller is responsible for deleting the bytes after use.
+    
+    Enforces MAX_FILE_SIZE_MB limit to prevent OOM.
     """
+    from config import MAX_FILE_SIZE_MB
+    
     drive = get_drive_service()
 
     metadata = drive.files().get(
@@ -92,6 +96,15 @@ def stream_file_to_memory(file_id: str) -> Tuple[bytes, str, str]:
 
     filename = metadata.get("name", "unknown")
     mime_type = metadata.get("mimeType", "")
+    file_size_bytes = metadata.get("size", 0)
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+
+    # Pre-check file size to prevent OOM
+    if file_size_bytes > 0 and file_size_bytes > max_bytes:
+        raise ValueError(
+            f"File '{filename}' is {file_size_bytes / 1024 / 1024:.1f}MB, "
+            f"exceeds limit of {MAX_FILE_SIZE_MB}MB"
+        )
 
     # Google Docs/Slides/Sheets → export as PDF
     if mime_type.startswith(GOOGLE_APPS_MIME):
@@ -107,8 +120,18 @@ def stream_file_to_memory(file_id: str) -> Tuple[bytes, str, str]:
     downloader = MediaIoBaseDownload(buf, request, chunksize=4 * 1024 * 1024)
 
     done = False
+    bytes_downloaded = 0
     while not done:
         _, done = downloader.next_chunk()
+        bytes_downloaded = len(buf.getvalue())
+        
+        # Safety check during download to catch oversized files
+        if bytes_downloaded > max_bytes:
+            buf.close()
+            raise ValueError(
+                f"File '{filename}' exceeded {MAX_FILE_SIZE_MB}MB during download "
+                f"({bytes_downloaded / 1024 / 1024:.1f}MB downloaded)"
+            )
 
     file_bytes = buf.getvalue()
     buf.close()  # Release buffer immediately

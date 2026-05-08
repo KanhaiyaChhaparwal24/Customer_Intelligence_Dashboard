@@ -5,6 +5,7 @@ from database import get_db, ProcessedFile, ProcessedRow
 from services.sync_service import sync_all, retry_failed_ocr, get_sync_status
 from services.drive_service import stream_file_to_memory
 from services.ocr_service import extract_invoice_data
+from scheduler import get_sync_state
 
 router = APIRouter(tags=["sync & invoices"])
 
@@ -13,7 +14,21 @@ router = APIRouter(tags=["sync & invoices"])
 
 @router.get("/sync/status")
 def sync_status():
-    return get_sync_status()
+    """
+    Get current sync status including:
+    - is_running: bool
+    - elapsed_seconds: float (if running)
+    - status: "running" | "completed" | "failed" | "idle"
+    - last_result: dict (if completed)
+    """
+    scheduler_state = get_sync_state()
+    service_state = get_sync_status()
+    
+    # Merge both states
+    return {
+        **scheduler_state,
+        "service_stats": service_state,
+    }
 
 
 @router.post("/sync/trigger")

@@ -19,11 +19,16 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///../database/intelligenc
 
 # ── Scheduler ───────────────────────────────────────────────────────────────
 SYNC_INTERVAL_MINUTES: int = int(os.getenv("SYNC_INTERVAL_MINUTES", "30"))
+SYNC_TIMEOUT_SECONDS: int = int(os.getenv("SYNC_TIMEOUT_SECONDS", "3600"))  # 1 hour max per sync
+SYNC_MAX_RETRIES: int = int(os.getenv("SYNC_MAX_RETRIES", "3"))
 
 # ── OCR ─────────────────────────────────────────────────────────────────────
 MAX_OCR_CONCURRENCY: int = int(os.getenv("MAX_OCR_CONCURRENCY", "3"))
 OCR_RETRY_LIMIT: int = int(os.getenv("OCR_RETRY_LIMIT", "3"))
 OCR_DELAY_SECONDS: float = float(os.getenv("OCR_DELAY_SECONDS", "1.0"))
+OCR_TIMEOUT_SECONDS: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "30"))  # Max time per Gemini call
+MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))  # Max file size in MB
+MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "5"))  # Process first N pages only
 ENABLE_DEBUG_DOWNLOADS: bool = os.getenv("ENABLE_DEBUG_DOWNLOADS", "false").lower() == "true"
 
 # ── API ──────────────────────────────────────────────────────────────────────

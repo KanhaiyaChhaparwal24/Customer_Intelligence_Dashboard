@@ -114,13 +114,13 @@ async def _process_single_file(
     stats: Dict,
 ) -> bool:
     """Stream, OCR, and store one Drive file. Returns True on success."""
-    # Check OCR cache
-    if _is_file_cached(db, file_id):
-        logger.info(f"Cache hit: {filename} ({file_id}) — skipping OCR")
-        stats["files_skipped"] += 1
-        return True
-
     try:
+        # Check OCR cache
+        if _is_file_cached(db, file_id):
+            logger.info(f"Cache hit: {filename} ({file_id}) — skipping OCR")
+            stats["files_skipped"] += 1
+            return True
+
         # Stream file into memory
         file_bytes, mime_type, actual_name = await asyncio.to_thread(
             stream_file_to_memory, file_id
@@ -133,8 +133,28 @@ async def _process_single_file(
         # Explicit memory release
         del file_bytes
 
-        if extracted:
-            is_dup = _detect_duplicates(db, extracted)
+        if not extracted:
+            _mark_file_processed(db, file_id, actual_name, row_number, "failed")
+            stats["ocr_failed"] += 1
+            return False
+
+        # ── Validity check ──────────────────────────────────────────────
+        validity = extracted.get("validity_score", {})
+        validity_status = validity.get("status", "unknown")
+        
+        if validity_status == "invalid":
+            logger.warning(
+                f"Row {row_number}: Invalid invoice ({actual_name}). "
+                f"Reasons: {validity.get('reasons')}. Skipping."
+            )
+            _mark_file_processed(db, file_id, actual_name, row_number, "invalid")
+            stats["ocr_failed"] += 1
+            return False
+        
+        # Store with validity info
+        is_dup = _detect_duplicates(db, extracted)
+        
+        try:
             db.add(InvoiceExtraction(
                 file_id=file_id,
                 row_number=row_number,
@@ -155,56 +175,71 @@ async def _process_single_file(
                 shipping_state=extracted.get("shipping_state"),
                 platform=extracted.get("platform", "Unknown"),
                 is_duplicate=is_dup,
-                confidence="high",
+                confidence=validity_status,  # Use validity status as confidence
                 extracted_at=datetime.utcnow(),
             ))
             db.commit()
             _mark_file_processed(db, file_id, actual_name, row_number, "success")
             stats["ocr_success"] += 1
             return True
-        else:
+        except Exception as db_err:
+            db.rollback()
+            logger.error(f"Failed to store extraction for {file_id}: {db_err}")
             _mark_file_processed(db, file_id, actual_name, row_number, "failed")
             stats["ocr_failed"] += 1
             return False
 
+    except ValueError as ve:
+        # File size limit or URL parsing error
+        logger.error(f"Row {row_number}: File validation error: {ve}")
+        _mark_file_processed(db, file_id, filename, row_number, "failed")
+        stats["ocr_failed"] += 1
+        return False
     except Exception as e:
-        logger.error(f"Error processing file {file_id}: {e}")
+        logger.error(f"Error processing file {file_id} (row {row_number}): {e}")
         _mark_file_processed(db, file_id, filename, row_number, "failed")
         stats["ocr_failed"] += 1
         return False
 
 
 async def _process_warranty_row(db: Session, row: Dict, stats: Dict) -> str:
-    """Process a single warranty sheet row. Returns final status."""
+    """
+    Process a single warranty sheet row. Returns final status.
+    Row-level errors are isolated and logged, but don't crash sync.
+    """
     row_number = row["_row_number"]
     invoice_link = row.get("invoice_link", "").strip()
 
-    if not invoice_link:
-        logger.debug(f"Row {row_number}: no invoice link, skipping")
-        return "processed"
-
-    drive_info = extract_drive_id(invoice_link)
-    if not drive_info:
-        logger.warning(f"Row {row_number}: invalid Drive link: {invoice_link}")
-        return "failed"
-
     try:
+        if not invoice_link:
+            logger.debug(f"Row {row_number}: no invoice link, skipping")
+            return "processed"
+
+        drive_info = extract_drive_id(invoice_link)
+        if not drive_info:
+            logger.warning(f"Row {row_number}: invalid Drive link: {invoice_link}")
+            return "failed"
+
         if drive_info["type"] == "file":
             file_id = drive_info["id"]
             await _process_single_file(db, file_id, "file", row_number, stats)
 
         elif drive_info["type"] == "folder":
             folder_id = drive_info["id"]
-            files = await asyncio.to_thread(list_folder_files, folder_id)
-            logger.info(f"Row {row_number}: folder has {len(files)} files")
+            try:
+                files = await asyncio.to_thread(list_folder_files, folder_id)
+                logger.info(f"Row {row_number}: folder has {len(files)} files")
 
-            for f in files:
-                await _process_single_file(db, f["id"], f["name"], row_number, stats)
+                for f in files:
+                    await _process_single_file(db, f["id"], f["name"], row_number, stats)
+            except Exception as folder_err:
+                logger.error(f"Row {row_number}: Error listing folder {folder_id}: {folder_err}")
+                return "failed"
 
         return "processed"
 
     except Exception as e:
-        logger.error(f"Row {row_number} failed: {e}")
+        logger.error(f"Row {row_number} processing error: {e}", exc_info=True)
         return "failed"
 
 
@@ -285,8 +320,10 @@ import re  # noqa: E402
 
 async def sync_all() -> Dict:
     """
-    Full incremental sync. Idempotent — safe to call multiple times.
-    Returns stats dict.
+    Full incremental sync with fault tolerance.
+    - Idempotent — safe to call multiple times
+    - Row-level errors isolated — one bad row doesn't crash entire sync
+    - Returns stats dict with success/failure counts
     """
     global _sync_running, _last_sync_result
 
@@ -309,49 +346,76 @@ async def sync_all() -> Dict:
         "files_skipped": 0,
         "ocr_success": 0,
         "ocr_failed": 0,
+        "rows_succeeded": 0,
+        "rows_failed": 0,
     }
 
     try:
         # ── 1. Warranty rows (incremental) ───────────────────────────────
-        last_row = _get_last_processed_row(db)
-        new_rows, total_rows = read_warranty_rows(last_row)
-        stats["rows_scanned"] = total_rows
-        stats["new_rows"] = len(new_rows)
+        try:
+            last_row = _get_last_processed_row(db)
+            new_rows, total_rows = read_warranty_rows(last_row)
+            stats["rows_scanned"] = total_rows
+            stats["new_rows"] = len(new_rows)
 
-        logger.info(f"Sync: {len(new_rows)} new warranty rows to process")
+            logger.info(f"Sync: {len(new_rows)} new warranty rows to process")
 
-        for row in new_rows:
-            row_number = row["_row_number"]
+            for row in new_rows:
+                row_number = row["_row_number"]
 
-            # Insert row record with ALL fields from the warranty form
-            pr = ProcessedRow(
-                sheet_row_number=row_number,
-                timestamp=row.get("timestamp", ""),
-                email=row.get("email", "").lower().strip() or None,
-                phone=re.sub(r"\D", "", row.get("phone", ""))[-10:] or None,
-                warranty_brand=row.get("brand"),
-                warranty_product=row.get("product_name"),
-                warranty_colour=row.get("colour"),
-                warranty_size=row.get("size"),
-                status="processing",
-            )
-            db.add(pr)
-            db.commit()
+                # Insert row record with ALL fields from the warranty form
+                pr = ProcessedRow(
+                    sheet_row_number=row_number,
+                    timestamp=row.get("timestamp", ""),
+                    email=row.get("email", "").lower().strip() or None,
+                    phone=re.sub(r"\D", "", row.get("phone", ""))[-10:] or None,
+                    warranty_brand=row.get("brand"),
+                    warranty_product=row.get("product_name"),
+                    warranty_colour=row.get("colour"),
+                    warranty_size=row.get("size"),
+                    status="processing",
+                )
+                try:
+                    db.add(pr)
+                    db.commit()
+                except Exception as row_insert_err:
+                    db.rollback()
+                    logger.error(f"Row {row_number}: Failed to insert: {row_insert_err}")
+                    stats["rows_failed"] += 1
+                    continue
 
-            try:
-                status = await _process_warranty_row(db, row, stats)
-                pr.status = status
-                pr.processed_at = datetime.utcnow()
-            except Exception as e:
-                pr.status = "failed"
-                pr.last_error = str(e)
-                pr.retry_count = (pr.retry_count or 0) + 1
-                logger.error(f"Row {row_number} error: {e}")
+                try:
+                    status = await _process_warranty_row(db, row, stats)
+                    pr.status = status
+                    pr.processed_at = datetime.utcnow()
+                    if status == "processed":
+                        stats["rows_succeeded"] += 1
+                    else:
+                        stats["rows_failed"] += 1
+                except Exception as row_process_err:
+                    pr.status = "failed"
+                    pr.last_error = str(row_process_err)[:500]  # Truncate to prevent DB overflow
+                    pr.retry_count = (pr.retry_count or 0) + 1
+                    stats["rows_failed"] += 1
+                    logger.error(
+                        f"Row {row_number} processing exception: {row_process_err}",
+                        exc_info=True
+                    )
 
-            db.commit()
+                try:
+                    db.commit()
+                except Exception as commit_err:
+                    db.rollback()
+                    logger.error(f"Row {row_number}: Failed to commit status: {commit_err}")
+
+        except Exception as warranty_batch_err:
+            logger.error(f"Warranty batch processing failed: {warranty_batch_err}", exc_info=True)
 
         # ── 2. Shopify sync ──────────────────────────────────────────────
-        _sync_shopify(db)
+        try:
+            _sync_shopify(db)
+        except Exception as shopify_err:
+            logger.error(f"Shopify sync failed: {shopify_err}", exc_info=True)
 
         # ── 3. Finalise sync log ─────────────────────────────────────────
         duration = time.time() - start_time
@@ -379,12 +443,16 @@ async def sync_all() -> Dict:
     except Exception as e:
         duration = time.time() - start_time
         sync_log.status = "failed"
-        sync_log.error = str(e)
+        sync_log.error = str(e)[:500]
         sync_log.completed_at = datetime.utcnow()
         sync_log.duration_seconds = duration
         db.commit()
-        logger.error(f"Sync failed: {e}")
-        result = {"status": "failed", "error": str(e), "duration_seconds": round(duration, 2)}
+        logger.error(f"Sync critical error: {e}", exc_info=True)
+        result = {
+            "status": "failed",
+            "error": str(e),
+            "duration_seconds": round(duration, 2),
+        }
         _last_sync_result = result
         return result
 

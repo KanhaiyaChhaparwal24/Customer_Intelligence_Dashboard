@@ -67,12 +67,23 @@ Rules:
 
 
 def _convert_pdf_bytes_to_image(pdf_bytes: bytes) -> bytes:
-    """Convert first page of PDF to PNG bytes in memory. Never writes to disk."""
+    """
+    Convert first page of PDF to PNG bytes in memory. Never writes to disk.
+    Respects MAX_PDF_PAGES limit to avoid processing huge PDFs.
+    """
+    from config import MAX_PDF_PAGES
+    
     # Try PyMuPDF first (fastest, no poppler dependency)
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        page = doc[0]
+        
+        # Enforce page limit
+        page_count = len(doc)
+        if page_count > MAX_PDF_PAGES:
+            logger.info(f"PDF has {page_count} pages, processing only first {MAX_PDF_PAGES}")
+        
+        page = doc[0]  # Always first page
         pix = page.get_pixmap(dpi=150)
         img_bytes = pix.tobytes("png")
         doc.close()
@@ -85,7 +96,9 @@ def _convert_pdf_bytes_to_image(pdf_bytes: bytes) -> bytes:
     # Fallback: pdf2image (requires poppler)
     try:
         import pdf2image
-        images = pdf2image.convert_from_bytes(pdf_bytes, first_page=1, last_page=1, dpi=150)
+        images = pdf2image.convert_from_bytes(
+            pdf_bytes, first_page=1, last_page=min(MAX_PDF_PAGES, 1), dpi=150
+        )
         if images:
             import io
             buf = io.BytesIO()
@@ -108,6 +121,91 @@ def _refresh_today_stats():
         ocr_stats["today_date"] = today
 
 
+def _score_invoice_validity(extracted: Dict) -> Dict[str, Any]:
+    """
+    Score invoice validity to detect garbage/random screenshots.
+    Returns {status: "valid"|"suspicious"|"invalid", score: 0-100, reasons: [...]}.
+    
+    Valid invoice must have:
+    - order_id or invoice_number (mandatory)
+    - grand_total > 0 (mandatory)
+    - email or phone (at least one)
+    - customer_name (optional but expected)
+    
+    Suspicious if:
+    - Missing email AND phone
+    - grand_total = 0 or null
+    - Platform = "Unknown" (couldn't identify seller)
+    """
+    score = 0
+    reasons = []
+    
+    # Check mandatory fields
+    has_order_id = bool(extracted.get("order_id"))
+    has_invoice_number = bool(extracted.get("invoice_number"))
+    has_total = extracted.get("grand_total") and extracted.get("grand_total") > 0
+    has_email = bool(extracted.get("email"))
+    has_phone = bool(extracted.get("phone"))
+    has_customer_name = bool(extracted.get("customer_name"))
+    has_platform = extracted.get("platform") and extracted.get("platform") != "Unknown"
+    
+    # Mandatory: at least one ID field
+    if has_order_id or has_invoice_number:
+        score += 30
+    else:
+        reasons.append("missing_order_id")
+        score -= 20
+    
+    # Mandatory: must have amount
+    if has_total:
+        score += 25
+    else:
+        reasons.append("missing_grand_total")
+        score -= 30
+    
+    # Contact info: must have at least email or phone
+    if has_email or has_phone:
+        score += 20
+    else:
+        reasons.append("missing_contact_info")
+        score -= 25
+    
+    # Customer name is expected
+    if has_customer_name:
+        score += 10
+    else:
+        reasons.append("missing_customer_name")
+        score -= 5
+    
+    # Platform should be identifiable
+    if has_platform:
+        score += 15
+    else:
+        reasons.append("unknown_platform")
+        score -= 10
+    
+    # Verify reasonable amount (basic sanity check)
+    amount = extracted.get("grand_total", 0)
+    if amount and (amount < 10 or amount > 1000000):
+        reasons.append(f"amount_out_of_range({amount})")
+        score -= 10
+    
+    # Determine status
+    if score >= 60:
+        status = "valid"
+    elif score >= 30:
+        status = "suspicious"
+    else:
+        status = "invalid"
+    
+    return {
+        "status": status,
+        "score": max(0, min(100, score)),
+        "reasons": reasons,
+    }
+
+
+
 async def extract_invoice_data(
     file_bytes: bytes,
     mime_type: str,
@@ -118,7 +216,11 @@ async def extract_invoice_data(
     Extract structured invoice data using Gemini Vision.
     Processes entirely in memory — no disk I/O.
     Returns extracted dict or None on failure.
+    
+    Enforces OCR_TIMEOUT_SECONDS to prevent hanging.
     """
+    from config import OCR_TIMEOUT_SECONDS
+    
     async with _semaphore:
         last_error: Optional[str] = None
 
@@ -143,12 +245,23 @@ async def extract_invoice_data(
                 # Base64 encode
                 b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-                # Call Gemini
+                # Call Gemini with timeout enforcement
                 model = genai.GenerativeModel("gemini-2.5-flash")
-                response = await asyncio.to_thread(
-                    model.generate_content,
-                    [{"mime_type": image_mime, "data": b64}, OCR_PROMPT]
-                )
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            model.generate_content,
+                            [{"mime_type": image_mime, "data": b64}, OCR_PROMPT]
+                        ),
+                        timeout=OCR_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    last_error = f"Gemini call exceeded {OCR_TIMEOUT_SECONDS}s timeout"
+                    logger.warning(f"OCR timeout for {filename} (attempt {attempt + 1}): {last_error}")
+                    if attempt >= OCR_RETRY_LIMIT - 1:
+                        break
+                    await asyncio.sleep(2 ** attempt)
+                    continue
 
                 # Parse response
                 text = response.text.strip()
@@ -176,6 +289,9 @@ async def extract_invoice_data(
                     except ValueError:
                         extracted["grand_total"] = None
 
+                # Add validity score
+                extracted["validity_score"] = _score_invoice_validity(extracted)
+
                 # Explicit cleanup of large objects
                 del image_bytes
                 del b64
@@ -186,7 +302,10 @@ async def extract_invoice_data(
                 ocr_stats["success"] += 1
                 ocr_stats["today_calls"] += 1
 
-                logger.info(f"OCR success: {filename} (attempt {attempt + 1})")
+                logger.info(
+                    f"OCR success: {filename} (attempt {attempt + 1}, "
+                    f"validity: {extracted['validity_score']['status']})"
+                )
                 return extracted
 
             except json.JSONDecodeError as e:
