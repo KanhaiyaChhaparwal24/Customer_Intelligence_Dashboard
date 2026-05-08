@@ -8,23 +8,25 @@ A production-grade, full-stack automated analytics system for a luggage ecommerc
 
 ## Live Screenshots
 
-![Overview Tab](file:///C:/Users/LENOVO/.gemini/antigravity/brain/9b659697-b6c7-4d48-a2d9-08d925950ed0/dashboard_main_1778220847610.png)
-*Overview tab — 9 KPI cards, live processing status, 8 charts*
+![Overview Tab](dashboard_main_1778220847610.png)
+_Overview tab — 9 KPI cards, live processing status, 8 charts_
 
-![Converted Customers](file:///C:/Users/LENOVO/.gemini/antigravity/brain/9b659697-b6c7-4d48-a2d9-08d925950ed0/dashboard_converted_1778220862687.png)
-*Converted Customers tab — searchable table with journey timeline*
+![Converted Customers](dashboard_converted_1778223916298.png)
+_Converted Customers tab — searchable table with journey timeline_
 
 ---
 
 ## How to Start the System
 
 ### Terminal 1 — Backend (FastAPI)
+
 ```powershell
 cd e:\Coding\dashborad
 .\venv\Scripts\python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload --app-dir backend
 ```
 
 ### Terminal 2 — Frontend (React)
+
 ```powershell
 cd e:\Coding\dashborad\frontend
 npm run dev
@@ -63,30 +65,32 @@ Google Sheets (Warranty + Shopify tabs)
 ## Key Components
 
 ### Backend Files
-| File | Purpose |
-|---|---|
-| `backend/config.py` | All env vars + fuzzy column mapping |
-| `backend/database.py` | SQLAlchemy models + indexes for 5 tables |
-| `backend/auth.py` | Google OAuth with token caching |
-| `backend/services/sheets_service.py` | Incremental Sheet reader, fuzzy columns |
-| `backend/services/drive_service.py` | In-memory file streaming, folder listing |
-| `backend/services/ocr_service.py` | Gemini Vision, rate limiting, PDF→PNG |
-| `backend/services/sync_service.py` | Full sync orchestrator, idempotent |
-| `backend/services/analytics_service.py` | KPIs, matching engine, all chart data |
-| `backend/api/dashboard.py` | All `/dashboard/*` endpoints |
-| `backend/api/invoices.py` | Sync controls, retry, reprocess, CSV export |
-| `backend/scheduler.py` | APScheduler — immediate + every 30 min |
-| `backend/main.py` | FastAPI entry with CORS and lifespan |
+
+| File                                    | Purpose                                     |
+| --------------------------------------- | ------------------------------------------- |
+| `backend/config.py`                     | All env vars + fuzzy column mapping         |
+| `backend/database.py`                   | SQLAlchemy models + indexes for 5 tables    |
+| `backend/auth.py`                       | Google OAuth with token caching             |
+| `backend/services/sheets_service.py`    | Incremental Sheet reader, fuzzy columns     |
+| `backend/services/drive_service.py`     | In-memory file streaming, folder listing    |
+| `backend/services/ocr_service.py`       | Gemini Vision, rate limiting, PDF→PNG       |
+| `backend/services/sync_service.py`      | Full sync orchestrator, idempotent          |
+| `backend/services/analytics_service.py` | KPIs, matching engine, all chart data       |
+| `backend/api/dashboard.py`              | All `/dashboard/*` endpoints                |
+| `backend/api/invoices.py`               | Sync controls, retry, reprocess, CSV export |
+| `backend/scheduler.py`                  | APScheduler — immediate + every 30 min      |
+| `backend/main.py`                       | FastAPI entry with CORS and lifespan        |
 
 ### Frontend Pages
-| Tab | Purpose |
-|---|---|
-| Overview | 9 KPI cards + live sync status + 8 charts |
-| Converted | Table with journey timeline modal |
-| Flipkart Only | Filterable customer table |
-| D2C Only | Filterable customer table |
-| All Customers | Unified view with source badges |
-| Invoice Processing | File log, status, retry buttons |
+
+| Tab                | Purpose                                   |
+| ------------------ | ----------------------------------------- |
+| Overview           | 9 KPI cards + live sync status + 8 charts |
+| Converted          | Table with journey timeline modal         |
+| Flipkart Only      | Filterable customer table                 |
+| D2C Only           | Filterable customer table                 |
+| All Customers      | Unified view with source badges           |
+| Invoice Processing | File log, status, retry buttons           |
 
 ---
 
@@ -119,13 +123,13 @@ GET  /export/csv?type=all|converted|flipkart|d2c
 
 ## Database Tables
 
-| Table | Purpose |
-|---|---|
-| `processed_rows` | Warranty sheet rows with status lifecycle |
-| `processed_files` | Drive file IDs — permanent OCR cache |
-| `invoice_extractions` | Structured JSON from Gemini OCR |
-| `shopify_orders` | D2C orders from Sheet Tab 2 |
-| `sync_logs` | Audit log of every scheduler run |
+| Table                 | Purpose                                   |
+| --------------------- | ----------------------------------------- |
+| `processed_rows`      | Warranty sheet rows with status lifecycle |
+| `processed_files`     | Drive file IDs — permanent OCR cache      |
+| `invoice_extractions` | Structured JSON from Gemini OCR           |
+| `shopify_orders`      | D2C orders from Sheet Tab 2               |
+| `sync_logs`           | Audit log of every scheduler run          |
 
 ---
 
@@ -142,6 +146,7 @@ GET  /export/csv?type=all|converted|flipkart|d2c
 ---
 
 ## Security
+
 - Gemini API key stays in `.env`, never exposed to frontend
 - OAuth token stored in `token.json` (not committed to git)
 - Invoice files are **never written to disk** — BytesIO only
