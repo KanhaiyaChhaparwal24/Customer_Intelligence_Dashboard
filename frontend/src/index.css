@@ -1,0 +1,86 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    @apply bg-bg text-slate-100 font-sans antialiased;
+    background: #020617;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #334155; }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-card border border-border rounded-2xl;
+    background: linear-gradient(135deg, rgba(15,23,42,0.9) 0%, rgba(10,22,40,0.95) 100%);
+    backdrop-filter: blur(12px);
+    transition: all 0.25s ease;
+  }
+  .glass-card:hover {
+    border-color: rgba(99,102,241,0.3);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    transform: translateY(-2px);
+  }
+  .kpi-card {
+    @apply glass-card p-5 cursor-default;
+  }
+  .btn-primary {
+    @apply px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200;
+    @apply bg-converted text-white hover:opacity-90 active:scale-95;
+  }
+  .btn-ghost {
+    @apply px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200;
+    @apply bg-transparent border border-border text-slate-400 hover:border-slate-500 hover:text-slate-200;
+  }
+  .tab-btn {
+    @apply px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 whitespace-nowrap;
+    @apply text-muted hover:text-slate-200 hover:bg-surface;
+  }
+  .tab-btn.active {
+    @apply text-white;
+    background: linear-gradient(135deg, rgba(139,92,246,0.2), rgba(40,116,240,0.15));
+    border: 1px solid rgba(139,92,246,0.3);
+  }
+  .data-table {
+    @apply w-full text-sm;
+  }
+  .data-table th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted border-b border-border;
+  }
+  .data-table td {
+    @apply px-4 py-3 border-b border-border/50 text-slate-300;
+  }
+  .data-table tr:hover td {
+    @apply bg-surface/50;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .badge-flipkart { @apply badge bg-flipkart/20 text-blue-300; }
+  .badge-d2c { @apply badge bg-d2c/20 text-orange-300; }
+  .badge-converted { @apply badge bg-converted/20 text-purple-300; }
+  .badge-success { @apply badge bg-revenue/20 text-emerald-300; }
+  .badge-failed { @apply badge bg-red-500/20 text-red-300; }
+  .badge-pending { @apply badge bg-yellow-500/20 text-yellow-300; }
+  .input-search {
+    @apply bg-surface border border-border rounded-xl px-4 py-2 text-sm text-slate-200;
+    @apply placeholder-muted focus:outline-none focus:border-converted/60 transition-colors;
+  }
+}
+
+/* Custom recharts overrides */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #0f172a !important;
+  border: 1px solid #1e293b !important;
+  border-radius: 12px !important;
+}
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: #1e293b;
+}
