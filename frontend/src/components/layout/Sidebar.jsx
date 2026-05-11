@@ -7,9 +7,10 @@ import {
 
 const NAV = [
   { id: 'overview',    label: 'Overview',          icon: LayoutDashboard },
+  { id: 'attribution', label: 'Attribution',       icon: ListFilter },
   { id: 'converted',   label: 'Converted',         icon: Zap },
-  { id: 'flipkart',    label: 'Flipkart Only',      icon: ShoppingBag },
-  { id: 'd2c',         label: 'D2C Only',           icon: Store },
+  { id: 'marketplace', label: 'Marketplace',       icon: ShoppingBag },
+  { id: 'd2c',         label: 'Direct D2C',        icon: Store },
   { id: 'customers',   label: 'All Customers',      icon: Users },
   { id: 'invoices',    label: 'Invoice Processing', icon: FileSearch },
 ]

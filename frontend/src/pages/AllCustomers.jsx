@@ -17,11 +17,27 @@ export default function AllCustomers() {
     { key: 'phone',   label: 'Phone',   render: (v) => fmtPhone(v) },
     { key: 'product', label: 'Product', render: (v, r) => truncate(r.product || r.product_title || v, 30) },
     { key: 'source',  label: 'Source',
-      render: (v) => (
-        v === 'converted' ? <Badge type="converted">Converted</Badge>
-        : v === 'flipkart' ? <Badge type="flipkart">Flipkart</Badge>
-        : <Badge type="d2c">D2C</Badge>
-      )
+      render: (v) => {
+        const sourceMap = {
+          'converted': { badge: 'converted', text: 'Marketplace→D2C' },
+          'marketplace': { badge: 'flipkart', text: 'Marketplace Only' },
+          'flipkart': { badge: 'flipkart', text: 'Flipkart' },
+          'd2c': { badge: 'd2c', text: 'Direct D2C' },
+          'probable_d2c': { badge: 'converted', text: 'Probable D2C' },
+          'unknown': { badge: 'unknown', text: 'Unknown' },
+        }
+        const mapping = sourceMap[v] || { badge: 'unknown', text: v || 'Unknown' }
+        return <Badge type={mapping.badge}>{mapping.text}</Badge>
+      }
+    },
+    { key: 'detected_source', label: 'Platform',
+      render: (v) => <span className="text-xs text-slate-400">{v || '—'}</span>
+    },
+    { key: 'source_confidence', label: 'Confidence',
+      render: (v) => {
+        const conf = Math.round((v || 0) * 100)
+        return <span className={`text-xs font-semibold ${conf >= 80 ? 'text-emerald-400' : conf >= 50 ? 'text-yellow-400' : 'text-slate-400'}`}>{conf}%</span>
+      }
     },
     { key: 'spend',   label: 'Spend',   render: (v) => <span className="text-emerald-400">{fmtCurrency(v)}</span> },
     { key: 'city',    label: 'City',    render: (v) => v || '—' },

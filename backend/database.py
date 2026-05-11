@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, String, Integer, Float,
-    Boolean, DateTime, Text, Index, UniqueConstraint
+    Boolean, DateTime, Text, Index, text
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -43,11 +43,13 @@ class ProcessedRow(Base):
     warranty_product = Column(String)
     warranty_colour  = Column(String)
     warranty_size    = Column(String)
+    invoice_link     = Column(String)
     # Processing state
     status           = Column(String, default="pending")  # pending/processing/processed/failed/retrying
     processed_at     = Column(DateTime)
     retry_count      = Column(Integer, default=0)
     last_error       = Column(Text)
+    next_retry_at    = Column(DateTime)
 
     __table_args__ = (
         Index("ix_processed_rows_email",  "email"),
@@ -78,7 +80,8 @@ class ProcessedFile(Base):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TABLE: invoice_extractions
-# Structured JSON extracted by Gemini OCR from each invoice file
+# Structured JSON extracted by Gemini OCR from each invoice file.
+# v2.1: Added attribution columns (detected_source, source_confidence, attribution_method)
 # ─────────────────────────────────────────────────────────────────────────────
 class InvoiceExtraction(Base):
     __tablename__ = "invoice_extractions"
@@ -97,14 +100,29 @@ class InvoiceExtraction(Base):
     colour         = Column(String)
     grand_total    = Column(Float)
     seller_name    = Column(String)
+    seller_gstin   = Column(String)
+    marketplace_keywords = Column(Text)
     billing_city   = Column(String)
     billing_state  = Column(String)
     shipping_city  = Column(String)
     shipping_state = Column(String)
     platform       = Column(String)
     is_duplicate   = Column(Boolean, default=False)
-    confidence     = Column(String, default="high")   # high / medium / low
+    confidence     = Column(String, default="high")   # high / medium / low / excel_only
     extracted_at   = Column(DateTime, default=datetime.utcnow)
+    # ── Attribution fields (v2.1) ─────────────────────────────────────────
+    # detected_source: The inferred platform/marketplace from OCR signals
+    detected_source    = Column(String)   # Flipkart | Amazon | Myntra | D2C | Shopify | Unknown
+    # source_confidence: How confident we are in detected_source (0.0–1.0)
+    source_confidence  = Column(Float)    # 0.0 – 1.0
+    # attribution_method: Which signal was used for source detection
+    attribution_method = Column(String)   # ocr_platform_field | ocr_seller_name | ocr_invoice_pattern | ocr_failed | fallback
+
+    # ── Orchestrator fields (v3.0) ────────────────────────────────────────────
+    ocr_provider       = Column(String, default="gemini")
+    ocr_fallback_used  = Column(Boolean, default=False)
+    ocr_latency_ms     = Column(Float, default=0.0)
+    ocr_attempts       = Column(Integer, default=1)
 
     __table_args__ = (
         Index("ix_inv_email",          "email"),
@@ -162,8 +180,49 @@ class SyncLog(Base):
     error            = Column(Text)
 
 
+def migrate_schema():
+    """
+    Safely add new attribution columns to invoice_extractions if they don't exist.
+    Called at startup — idempotent, safe to run on databases with or without these columns.
+    Existing rows get NULL for new columns (treated as 'Unknown' attribution).
+    """
+    new_cols = [
+        ("detected_source",    "VARCHAR"),
+        ("source_confidence",  "REAL"),
+        ("attribution_method", "VARCHAR"),
+        ("ocr_provider",       "VARCHAR"),
+        ("ocr_fallback_used",  "BOOLEAN"),
+        ("ocr_latency_ms",     "REAL"),
+        ("ocr_attempts",       "INTEGER"),
+        ("seller_gstin",       "VARCHAR"),
+        ("marketplace_keywords","TEXT"),
+    ]
+    with engine.connect() as conn:
+        for col_name, col_type in new_cols:
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE invoice_extractions ADD COLUMN {col_name} {col_type}"
+                ))
+                conn.commit()
+            except Exception:
+                pass
+                
+        # Also migrate processed_rows
+        try:
+            conn.execute(text("ALTER TABLE processed_rows ADD COLUMN invoice_link VARCHAR"))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE processed_rows ADD COLUMN next_retry_at DATETIME"))
+            conn.commit()
+        except Exception:
+            pass
+
+
 def create_tables():
     Base.metadata.create_all(bind=engine)
+    migrate_schema()
 
 
 def get_db():

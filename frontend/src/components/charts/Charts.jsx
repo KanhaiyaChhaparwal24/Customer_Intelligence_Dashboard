@@ -16,8 +16,10 @@ const TOOLTIP_STYLE = {
 export function SegmentDonut({ data }) {
   const chartData = [
     { name: 'Converted',     value: data?.converted_customers || 0, color: '#8b5cf6' },
-    { name: 'Flipkart Only', value: data?.only_flipkart       || 0, color: '#2874f0' },
-    { name: 'D2C Only',      value: data?.only_d2c            || 0, color: '#f97316' },
+    { name: 'Marketplace Only', value: data?.only_marketplace || 0, color: '#2874f0' },
+    { name: 'Direct D2C',    value: data?.direct_d2c_customers || 0, color: '#f97316' },
+    { name: 'Heuristic Attribution', value: data?.heuristic_attribution_count || data?.probable_d2c_count || 0, color: '#10b981' },
+    { name: 'Unknown',       value: data?.unknown_attribution_count || 0, color: '#64748b' },
   ]
   const total = chartData.reduce((s, c) => s + c.value, 0)
 
@@ -128,7 +130,7 @@ export function TopCities({ data = [] }) {
           <XAxis dataKey="city" tick={{ fill: '#64748b', fontSize: 10 }} />
           <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
           <Tooltip contentStyle={TOOLTIP_STYLE} />
-          <Bar dataKey="flipkart" fill="#2874f0" radius={[4, 4, 0, 0]} name="Flipkart" />
+          <Bar dataKey="marketplace" fill="#2874f0" radius={[4, 4, 0, 0]} name="Marketplace" />
           <Bar dataKey="d2c"      fill="#f97316" radius={[4, 4, 0, 0]} name="D2C" />
           <Legend wrapperStyle={{ fontSize: '11px' }} formatter={(v) => <span style={{ color: '#94a3b8' }}>{v}</span>} />
         </BarChart>

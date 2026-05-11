@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 
 sys.path.insert(0, os.path.join(os.getcwd(), "backend"))
 
-from database import SessionLocal, ProcessedRow, ProcessedFile, InvoiceExtraction, ShopifyOrder, SyncLog
+from database import create_tables, SessionLocal, ProcessedRow, ProcessedFile, InvoiceExtraction, ShopifyOrder, SyncLog
 from services.sync_service import sync_all
 
 
@@ -27,6 +27,7 @@ def reset_data() -> None:
 
 
 if __name__ == "__main__":
+    create_tables()
     reset_data()
     result = asyncio.run(sync_all())
     print(json.dumps(result, indent=2))

@@ -23,6 +23,8 @@ export const getColours     = ()              => api.get('/dashboard/colours')
 export const getPayments    = ()              => api.get('/dashboard/payments')
 export const getInvoices    = (page = 1)      => api.get(`/dashboard/invoices?page=${page}`)
 export const getJourney     = (email)         => api.get(`/dashboard/journey/${encodeURIComponent(email)}`)
+export const getAttributionInsights = ()      => api.get('/dashboard/attribution-insights')
+export const getOcrMetrics          = ()      => api.get('/dashboard/ocr-metrics')
 
 export const getCustomers = (params = {}) => {
   const q = new URLSearchParams(params).toString()

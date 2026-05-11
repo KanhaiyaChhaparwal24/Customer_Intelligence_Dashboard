@@ -9,18 +9,21 @@ import FlipkartOnly     from './pages/FlipkartOnly'
 import D2COnly          from './pages/D2COnly'
 import AllCustomers     from './pages/AllCustomers'
 import InvoiceProcessing from './pages/InvoiceProcessing'
+import Attribution      from './pages/Attribution'
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview')
   const { data: kpis, reload: reloadKpis } = useApi(getKpis)
 
   const PAGES = {
-    overview:  <Overview />,
-    converted: <Converted />,
-    flipkart:  <FlipkartOnly />,
-    d2c:       <D2COnly />,
-    customers: <AllCustomers />,
-    invoices:  <InvoiceProcessing />,
+    overview:    <Overview />,
+    attribution: <Attribution />,
+    converted:   <Converted />,
+    marketplace: <FlipkartOnly />,
+    flipkart:    <FlipkartOnly />, // backward compat
+    d2c:         <D2COnly />,
+    customers:   <AllCustomers />,
+    invoices:    <InvoiceProcessing />,
   }
 
   return (

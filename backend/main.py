@@ -11,9 +11,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 
 from config import CORS_ORIGINS, BACKEND_PORT
-from database import create_tables
+from database import create_tables, engine
 from scheduler import start_scheduler, stop_scheduler
 from api.dashboard import router as dashboard_router
 from api.invoices import router as invoices_router
@@ -25,10 +26,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def run_startup_validation():
+    """Validate backend environment on boot."""
+    print("\n" + "="*50)
+    print(" CUSTOMER INTELLIGENCE DASHBOARD — STARTUP ")
+    print("="*50)
+    
+    # 1. Gemini Check
+    from config import GEMINI_API_KEY
+    if not GEMINI_API_KEY:
+        print("[!] ERROR: GEMINI_API_KEY not found in .env")
+    else:
+        print(f"[*] Gemini API: Configured (Key: {GEMINI_API_KEY[:4]}...{GEMINI_API_KEY[-4:]})")
+    
+    # 2. Pipeline Mode
+    print("[*] OCR Mode: Gemini-Only (High Precision)")
+    print("[*] Fallback: Heuristic Data Linking (Enabled)")
+    
+    # 3. Dependencies check
+    import fitz
+    print(f"[*] PDF Support: Active (PyMuPDF {fitz.__version__})")
+    
+    # 4. DB check
+    from database import engine
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("[*] Database: Connected (SQLite)")
+    except Exception as e:
+        print(f"[!] Database ERROR: {e}")
+
+    print("="*50 + "\n")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
+    run_startup_validation()
     logger.info("Creating database tables...")
     create_tables()
     logger.info("Starting APScheduler...")

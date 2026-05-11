@@ -108,7 +108,10 @@ def read_warranty_rows(last_row: int = 0) -> Tuple[List[Dict], int]:
                         link = getattr(cell.hyperlink, "target", None)
                         normalized[field] = str(link or cell.value or "").strip()
                     else:
-                        normalized[field] = str(cell.value or "").strip()
+                        val = cell.value
+                        if isinstance(val, float) and val.is_integer():
+                            val = int(val)
+                        normalized[field] = str(val if val is not None else "").strip()
 
                 has_data = any(v for k, v in normalized.items() if k != "_row_number")
                 if not has_data:

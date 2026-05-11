@@ -9,7 +9,8 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Dict, Optional, List
+from datetime import timedelta
+from typing import Dict, Optional, List, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -19,9 +20,8 @@ from database import (
 )
 from services.sheets_service import read_warranty_rows, read_shopify_rows
 from services.drive_service import extract_drive_id, stream_file_to_memory, list_folder_files
-from services.local_file_service import stream_local_file_to_memory
-from services.ocr_service import extract_invoice_data
-from config import ENABLE_DEBUG_DOWNLOADS, USE_LOCAL_SHEETS, LOCAL_SHEETS_DIR
+from services.ocr_service import process_invoice_orchestrated
+from config import SYNC_MAX_RETRIES, OCR_RETRY_QUEUE_INTERVAL_SECONDS, OCR_QUEUE_BATCH_SIZE, OCR_RETRY_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +69,17 @@ def _mark_file_processed(
     row_number: int,
     status: str,
 ) -> None:
+    success_statuses = ("success", "processed", "cached", "heuristic_success")
     existing = db.query(ProcessedFile).filter(ProcessedFile.file_id == file_id).first()
     if existing:
-        existing.processed = (status == "success")
+        existing.processed = (status in success_statuses)
         existing.processed_at = datetime.utcnow()
         existing.extraction_status = status
     else:
         db.add(ProcessedFile(
             file_id=file_id,
             filename=filename,
-            processed=(status == "success"),
+            processed=(status in success_statuses),
             processed_at=datetime.utcnow(),
             extraction_status=status,
             row_number=row_number,
@@ -113,14 +114,14 @@ async def _process_single_file(
     filename: str,
     row_number: int,
     stats: Dict,
-) -> bool:
-    """Stream, OCR, and store one Drive file. Returns True on success."""
+) -> Tuple[bool, str]:
+    """Stream, OCR, and store one Drive file. Returns (success, status_string)."""
     try:
         # Check OCR cache
         if _is_file_cached(db, file_id):
             logger.info(f"Cache hit: {filename} ({file_id}) — skipping OCR")
             stats["files_skipped"] += 1
-            return True
+            return True, "cached"
 
         # Stream file into memory
         file_bytes, mime_type, actual_name = await asyncio.to_thread(
@@ -128,25 +129,25 @@ async def _process_single_file(
         )
         stats["files_processed"] += 1
 
-        result = await _process_bytes_file(db, file_id, actual_name, file_bytes, mime_type, row_number, stats)
+        result_bool, result_str = await _process_bytes_file(db, file_id, actual_name, file_bytes, mime_type, row_number, stats)
         # release memory
         try:
             del file_bytes
         except Exception:
             pass
-        return result
+        return result_bool, result_str
 
     except ValueError as ve:
         # File size limit or URL parsing error
         logger.error(f"Row {row_number}: File validation error: {ve}")
         _mark_file_processed(db, file_id, filename, row_number, "failed")
         stats["ocr_failed"] += 1
-        return False
+        return False, "invalid"
     except Exception as e:
         logger.error(f"Error processing file {file_id} (row {row_number}): {e}")
         _mark_file_processed(db, file_id, filename, row_number, "failed")
         stats["ocr_failed"] += 1
-        return False
+        return False, "failed"
 
 
 async def _process_warranty_row(db: Session, row: Dict, stats: Dict) -> str:
@@ -167,41 +168,28 @@ async def _process_warranty_row(db: Session, row: Dict, stats: Dict) -> str:
         if drive_info:
             if drive_info["type"] == "file":
                 file_id = drive_info["id"]
-                ok = await _process_single_file(db, file_id, "file", row_number, stats)
-                return "processed" if ok else "failed"
+                ok, status_str = await _process_single_file(db, file_id, "file", row_number, stats)
+                return status_str
             elif drive_info["type"] == "folder":
                 folder_id = drive_info["id"]
                 folder_ok = True
+                final_status = "processed"
                 try:
                     files = await asyncio.to_thread(list_folder_files, folder_id)
                     logger.info(f"Row {row_number}: folder has {len(files)} files")
 
                     for f in files:
-                        file_ok = await _process_single_file(db, f["id"], f["name"], row_number, stats)
+                        file_ok, file_status = await _process_single_file(db, f["id"], f["name"], row_number, stats)
                         folder_ok = folder_ok and file_ok
+                        final_status = file_status  # Last file status dictates folder status for simplicity
                 except Exception as folder_err:
                     logger.error(f"Row {row_number}: Error listing folder {folder_id}: {folder_err}")
                     return "failed"
 
-            return "processed" if folder_ok else "failed"
+                return final_status if folder_ok else "failed"
 
-        # 2) If configured to use local sheets, treat invoice_link as filename
-        if USE_LOCAL_SHEETS:
-            try:
-                file_bytes, mime_type, actual_name = await asyncio.to_thread(
-                    stream_local_file_to_memory, LOCAL_SHEETS_DIR, invoice_link
-                )
-                local_id = f"local:{actual_name}"
-                stats["files_processed"] += 1
-                await asyncio.to_thread(lambda: None)  # yield
-                ok = await _process_bytes_file(db, local_id, actual_name, file_bytes, mime_type, row_number, stats)
-                return "processed" if ok else "failed"
-            except ValueError as lf_err:
-                logger.warning(f"Row {row_number}: local file not found: {lf_err}")
-                return "failed"
-
-        logger.warning(f"Row {row_number}: invalid Drive link and no local file: {invoice_link}")
-        return "failed"
+        logger.warning(f"Row {row_number}: invalid Drive link: {invoice_link}")
+        return "invalid"
 
     except Exception as e:
         logger.error(f"Row {row_number} processing error: {e}", exc_info=True)
@@ -216,7 +204,7 @@ async def _process_bytes_file(
     mime_type: str,
     row_number: int,
     stats: Dict,
-) -> bool:
+) -> Tuple[bool, str]:
     """
     Process already-read bytes: run OCR and store results. 
     On OCR failure or quota hit, create Excel-only fallback extraction.
@@ -227,60 +215,43 @@ async def _process_bytes_file(
         if _is_file_cached(db, file_id):
             logger.info(f"Cache hit: {actual_name} ({file_id}) — skipping OCR")
             stats["files_skipped"] += 1
-            return True
+            return True, "cached"
 
-        extracted = await extract_invoice_data(file_bytes, mime_type, actual_name, file_id)
+        # Delegate to Gemini OCR Orchestrated Entry Point
+        extracted, status_result = await process_invoice_orchestrated(
+            db=db,
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            actual_name=actual_name,
+            file_id=file_id,
+            row_number=row_number,
+        )
 
-        # If OCR fails (None), create Excel-only fallback
+        # Quota hit — mark for retry later, do NOT store any extraction yet
+        if status_result == "retry_pending":
+            logger.info(f"Row {row_number}: Gemini quota hit for {actual_name} — queued as retry_pending")
+            _mark_file_processed(db, file_id, actual_name, row_number, "retry_pending")
+            stats["ocr_failed"] += 1
+            return False, "retry_pending"
+
         if not extracted:
-            logger.warning(
-                f"Row {row_number}: OCR failed for {actual_name}. "
-                f"Creating Excel-only fallback using warranty form data."
-            )
-            # Get the warranty row to extract fallback data
-            warranty_row = db.query(ProcessedRow).filter(ProcessedRow.sheet_row_number == row_number).first()
-            if warranty_row:
-                # Create minimal extraction from warranty form
-                extracted = {
-                    "customer_name": warranty_row.email or "Unknown",
-                    "email": warranty_row.email,
-                    "phone": warranty_row.phone,
-                    "order_id": None,
-                    "invoice_number": None,
-                    "invoice_date": warranty_row.timestamp,
-                    "product_title": warranty_row.warranty_product,
-                    "size": warranty_row.warranty_size,
-                    "colour": warranty_row.warranty_colour,
-                    "grand_total": None,
-                    "seller_name": warranty_row.warranty_brand,
-                    "billing_city": None,
-                    "billing_state": None,
-                    "shipping_city": None,
-                    "shipping_state": None,
-                    "platform": "Warranty_Registration",
-                    "validity_score": {
-                        "status": "excel_only",
-                        "score": 50,
-                        "reasons": ["ocr_failed_using_excel_data"],
-                    }
-                }
-            else:
-                logger.error(f"Row {row_number}: Could not find warranty row for fallback")
-                _mark_file_processed(db, file_id, actual_name, row_number, "failed")
-                stats["ocr_failed"] += 1
-                return False
+            logger.error(f"Row {row_number}: OCR failed completely for {actual_name}")
+            _mark_file_processed(db, file_id, actual_name, row_number, "failed")
+            stats["ocr_failed"] += 1
+            return False, "failed"
 
         validity = extracted.get("validity_score", {})
         validity_status = validity.get("status", "unknown")
-        
-        # Only reject if genuinely invalid (not excel_only)
-        if validity_status == "invalid":
+
+        # Only reject genuinely invalid invoices (not heuristic/excel_only data)
+        if validity_status == "invalid" and status_result != "heuristic_success":
             logger.warning(
-                f"Row {row_number}: Invalid invoice ({actual_name}). Reasons: {validity.get('reasons')}. Skipping."
+                f"Row {row_number}: Invalid invoice ({actual_name}). "
+                f"Reasons: {validity.get('reasons')}. Skipping."
             )
             _mark_file_processed(db, file_id, actual_name, row_number, "invalid")
             stats["ocr_failed"] += 1
-            return False
+            return False, "invalid"
 
         is_dup = _detect_duplicates(db, extracted)
         try:
@@ -306,28 +277,36 @@ async def _process_bytes_file(
                 is_duplicate=is_dup,
                 confidence=validity_status,
                 extracted_at=datetime.utcnow(),
+                detected_source=extracted.get("detected_source", "Unknown"),
+                source_confidence=extracted.get("source_confidence", 0.0),
+                attribution_method=extracted.get("detection_method", "fallback"),
+                ocr_provider=extracted.get("ocr_provider", "unknown"),
+                ocr_fallback_used=extracted.get("ocr_fallback_used", False),
+                ocr_latency_ms=extracted.get("ocr_latency_ms", 0.0),
+                ocr_attempts=extracted.get("ocr_attempts", 1),
             ))
             db.commit()
-            _mark_file_processed(db, file_id, actual_name, row_number, "success")
-            
-            # Count as success even for excel_only (data is present)
-            if validity_status == "excel_only":
-                logger.info(f"Row {row_number}: Stored Excel-only extraction for {actual_name}")
-            
+            _mark_file_processed(db, file_id, actual_name, row_number, status_result)
+
+            if status_result == "heuristic_success":
+                logger.info(f"Row {row_number}: Stored heuristic-only extraction for {actual_name}")
+            else:
+                logger.info(f"Row {row_number}: Stored Gemini extraction for {actual_name}")
+
             stats["ocr_success"] += 1
-            return True
+            return True, status_result
         except Exception as db_err:
             db.rollback()
             logger.error(f"Failed to store extraction for {file_id}: {db_err}")
             _mark_file_processed(db, file_id, actual_name, row_number, "failed")
             stats["ocr_failed"] += 1
-            return False
+            return False, "failed"
 
     except Exception as e:
         logger.error(f"Byte-processing error for {file_id}: {e}")
         _mark_file_processed(db, file_id, actual_name, row_number, "failed")
         stats["ocr_failed"] += 1
-        return False
+        return False, "failed"
 
 
 def _sync_shopify(db: Session) -> int:
@@ -467,8 +446,9 @@ async def sync_all() -> Dict:
                     pr.warranty_product = row.get("product_name")
                     pr.warranty_colour = row.get("colour")
                     pr.warranty_size = row.get("size")
-                    pr.status = "processing"
-                    logger.debug(f"Row {row_number}: Updated existing record")
+                    # v3.0: Set status to queued for background worker
+                    pr.status = "queued"
+                    logger.debug(f"Row {row_number}: Updated existing record and queued for OCR")
                 else:
                     # Insert new row
                     pr = ProcessedRow(
@@ -480,36 +460,20 @@ async def sync_all() -> Dict:
                         warranty_product=row.get("product_name"),
                         warranty_colour=row.get("colour"),
                         warranty_size=row.get("size"),
-                        status="processing",
+                        status="queued",
+                        invoice_link=row.get("invoice_link", "").strip()  # Need to store this for background worker!
                     )
                     db.add(pr)
-                    logger.debug(f"Row {row_number}: Inserted new record")
+                    logger.debug(f"Row {row_number}: Inserted new record and queued for OCR")
 
                 try:
                     db.commit()
+                    stats["rows_succeeded"] += 1
                 except Exception as row_insert_err:
                     db.rollback()
                     logger.error(f"Row {row_number}: Failed to upsert: {row_insert_err}")
                     stats["rows_failed"] += 1
                     continue
-
-                try:
-                    status = await _process_warranty_row(db, row, stats)
-                    pr.status = status
-                    pr.processed_at = datetime.utcnow()
-                    if status == "processed":
-                        stats["rows_succeeded"] += 1
-                    else:
-                        stats["rows_failed"] += 1
-                except Exception as row_process_err:
-                    pr.status = "failed"
-                    pr.last_error = str(row_process_err)[:500]  # Truncate to prevent DB overflow
-                    pr.retry_count = (pr.retry_count or 0) + 1
-                    stats["rows_failed"] += 1
-                    logger.error(
-                        f"Row {row_number} processing exception: {row_process_err}",
-                        exc_info=True
-                    )
 
                 try:
                     db.commit()
@@ -577,12 +541,13 @@ async def retry_failed_ocr() -> Dict:
     try:
         failed_rows = (
             db.query(ProcessedRow)
-            .filter(ProcessedRow.status.in_(["failed", "retrying"]))
+            .filter(ProcessedRow.status.in_(["failed", "retrying", "retry_pending"]))
             .all()
         )
         for row in failed_rows:
-            row.status = "retrying"
+            row.status = "queued"
             row.retry_count = (row.retry_count or 0) + 1
+            row.next_retry_at = None
             db.commit()
             stats["retried"] += 1
 
@@ -590,5 +555,117 @@ async def retry_failed_ocr() -> Dict:
         # (simplified: trigger full sync which skips already-processed rows)
         result = await sync_all()
         return {**stats, "sync_result": result}
+    finally:
+        db.close()
+
+
+async def process_ocr_queue():
+    """
+    Background worker: pulls 'queued' and 'retry_pending' rows from DB.
+    Processes only small batches per interval to respect Gemini free-tier limits.
+    - 'queued'        → new rows, process immediately
+    - 'retry_pending' → quota-hit rows, process only when cooldown has cleared
+    """
+    from services.ocr_service import is_quota_cooling_down, ocr_stats
+
+    db = SessionLocal()
+    try:
+        run_started_at = datetime.utcnow()
+        logger.info("OCR queue worker started")
+
+        # Pick up 'queued' rows first
+        queued_rows = (
+            db.query(ProcessedRow)
+            .filter(ProcessedRow.status == "queued")
+            .order_by(ProcessedRow.sheet_row_number)
+            .limit(OCR_QUEUE_BATCH_SIZE)
+            .all()
+        )
+
+        # Also pick up 'retry_pending' rows, but ONLY if quota cooldown has cleared
+        retry_rows = []
+        if not is_quota_cooling_down():
+            now = datetime.utcnow()
+            retry_rows = (
+                db.query(ProcessedRow)
+                .filter(ProcessedRow.status == "retry_pending")
+                .filter((ProcessedRow.next_retry_at.is_(None)) | (ProcessedRow.next_retry_at <= now))
+                .order_by(ProcessedRow.sheet_row_number)
+                .limit(OCR_RETRY_BATCH_SIZE)
+                .all()
+            )
+            if retry_rows:
+                logger.info(
+                    f"Quota cooldown cleared — picking up {len(retry_rows)} retry_pending rows."
+                )
+
+        all_rows = queued_rows + retry_rows
+        if not all_rows:
+            ocr_stats["queue_last_run_at"] = run_started_at.isoformat()
+            ocr_stats["queue_last_run_status"] = "idle"
+            return
+
+        logger.info(
+            f"OCR Queue worker: {len(queued_rows)} queued + "
+            f"{len(retry_rows)} retry_pending = {len(all_rows)} rows to process."
+        )
+
+        stats = {
+            "files_processed": 0,
+            "files_skipped":   0,
+            "ocr_success":     0,
+            "ocr_failed":      0,
+        }
+
+        for pr in all_rows:
+            pr.status = "processing"
+            pr.last_error = None
+            db.commit()
+
+            row_dict = {
+                "_row_number": pr.sheet_row_number,
+                "invoice_link": pr.invoice_link or "",
+            }
+
+            try:
+                status = await _process_warranty_row(db, row_dict, stats)
+
+                # Map orchestrator status to ProcessedRow status
+                if status == "retry_pending":
+                    retry_delay = int(ocr_stats.get("last_retry_delay_seconds") or OCR_RETRY_QUEUE_INTERVAL_SECONDS)
+                    pr.status = "retry_pending"
+                    pr.next_retry_at = datetime.utcnow() + timedelta(seconds=retry_delay)
+                    pr.last_error = ocr_stats.get("last_error")
+                elif status in ("success", "heuristic_success", "cached", "processed"):
+                    pr.status = "processed"
+                    pr.next_retry_at = None
+                elif status == "failed" or status == "invalid":
+                    pr.retry_count = (pr.retry_count or 0) + 1
+                    if pr.retry_count < SYNC_MAX_RETRIES:
+                        pr.status = "queued"  # allow one more try
+                        pr.next_retry_at = None
+                    else:
+                        pr.status = "failed"
+                        pr.next_retry_at = None
+                else:
+                    pr.status = status or "processed"
+
+                pr.processed_at = datetime.utcnow()
+
+            except Exception as row_err:
+                pr.last_error = str(row_err)[:500]
+                pr.retry_count = (pr.retry_count or 0) + 1
+                pr.status = "retry_pending" if pr.retry_count < SYNC_MAX_RETRIES else "failed"
+                if pr.status == "retry_pending":
+                    pr.next_retry_at = datetime.utcnow() + timedelta(seconds=OCR_RETRY_QUEUE_INTERVAL_SECONDS)
+                logger.error(
+                    f"Row {pr.sheet_row_number} queue exception: {row_err}", exc_info=True
+                )
+
+            db.commit()
+        ocr_stats["queue_last_run_at"] = run_started_at.isoformat()
+        ocr_stats["queue_last_run_status"] = "completed"
+        ocr_stats["queue_last_run_count"] = len(all_rows)
+
     finally:
         db.close()

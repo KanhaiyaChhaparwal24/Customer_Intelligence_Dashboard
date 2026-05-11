@@ -1,10 +1,11 @@
 import asyncio
+from datetime import datetime
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from sqlalchemy.orm import Session
-from database import get_db, ProcessedFile, ProcessedRow
+from database import get_db, ProcessedFile, ProcessedRow, InvoiceExtraction
 from services.sync_service import sync_all, retry_failed_ocr, get_sync_status
 from services.drive_service import stream_file_to_memory
-from services.ocr_service import extract_invoice_data
+from services.ocr_service import process_invoice_orchestrated
 from scheduler import get_sync_state
 
 router = APIRouter(tags=["sync & invoices"])
@@ -56,7 +57,7 @@ async def retry_invoice(file_id: str, db: Session = Depends(get_db)):
 
     # Reset the file cache so sync will reprocess it
     record.processed = False
-    record.extraction_status = "retrying"
+    record.extraction_status = "retry_pending"
     db.commit()
 
     # Trigger targeted reprocess
@@ -64,13 +65,61 @@ async def retry_invoice(file_id: str, db: Session = Depends(get_db)):
         file_bytes, mime_type, filename = await asyncio.to_thread(
             stream_file_to_memory, file_id
         )
-        extracted = await extract_invoice_data(file_bytes, mime_type, filename, file_id)
+        extracted, status = await process_invoice_orchestrated(
+            db=db,
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            actual_name=filename,
+            file_id=file_id,
+            row_number=record.row_number or 0,
+        )
         del file_bytes
-        if extracted:
-            record.processed = True
-            record.extraction_status = "success"
+        if status == "retry_pending":
+            record.extraction_status = "retry_pending"
             db.commit()
-            return {"status": "success", "data": extracted}
+            return {"status": "retry_pending", "message": "Gemini quota hit; retry scheduled"}
+
+        if extracted:
+            existing = db.query(InvoiceExtraction).filter(InvoiceExtraction.file_id == file_id).first()
+            extraction_values = {
+                "file_id": file_id,
+                "row_number": record.row_number,
+                "customer_name": extracted.get("customer_name"),
+                "email": extracted.get("email"),
+                "phone": extracted.get("phone"),
+                "order_id": extracted.get("order_id"),
+                "invoice_number": extracted.get("invoice_number"),
+                "invoice_date": extracted.get("invoice_date"),
+                "product_title": extracted.get("product_title"),
+                "size": extracted.get("size"),
+                "colour": extracted.get("colour"),
+                "grand_total": extracted.get("grand_total"),
+                "seller_name": extracted.get("seller_name"),
+                "seller_gstin": extracted.get("seller_gstin"),
+                "marketplace_keywords": ", ".join(extracted.get("marketplace_keywords", [])) if isinstance(extracted.get("marketplace_keywords"), list) else extracted.get("marketplace_keywords"),
+                "billing_city": extracted.get("billing_city"),
+                "billing_state": extracted.get("billing_state"),
+                "shipping_city": extracted.get("shipping_city"),
+                "shipping_state": extracted.get("shipping_state"),
+                "platform": extracted.get("platform"),
+                "detected_source": extracted.get("detected_source"),
+                "source_confidence": extracted.get("source_confidence", 0.0),
+                "attribution_method": extracted.get("detection_method"),
+                "ocr_provider": extracted.get("ocr_provider", "gemini"),
+                "ocr_fallback_used": extracted.get("ocr_fallback_used", False),
+                "ocr_latency_ms": extracted.get("ocr_latency_ms", 0.0),
+                "ocr_attempts": extracted.get("ocr_attempts", 1),
+            }
+            if existing:
+                for key, value in extraction_values.items():
+                    setattr(existing, key, value)
+                existing.extracted_at = datetime.utcnow()
+            else:
+                db.add(InvoiceExtraction(**extraction_values))
+            record.processed = True
+            record.extraction_status = status or "success"
+            db.commit()
+            return {"status": status or "success", "data": extracted}
         else:
             record.extraction_status = "failed"
             db.commit()
@@ -87,8 +136,9 @@ def reprocess_row(row_number: int, background_tasks: BackgroundTasks, db: Sessio
     row = db.query(ProcessedRow).filter(ProcessedRow.sheet_row_number == row_number).first()
     if not row:
         raise HTTPException(status_code=404, detail="Row not found")
-    row.status = "pending"
+    row.status = "queued"
     row.retry_count = (row.retry_count or 0) + 1
+    row.next_retry_at = None
     db.commit()
     background_tasks.add_task(sync_all)
     return {"message": f"Row {row_number} queued for reprocessing"}
@@ -127,7 +177,16 @@ def export_csv(
     writer.writeheader()
     for row in data:
         # Flatten lists
-        flat = {k: (", ".join(v) if isinstance(v, list) else v) for k, v in row.items()}
+        flat = {
+            k: (
+                ", ".join(
+                    [str(item).strip() for item in v if item not in [None, "", "null"]]
+                )
+                if isinstance(v, list)
+                else ("" if v is None else str(v))
+            )
+            for k, v in row.items()
+        }
         writer.writerow(flat)
 
     buf.seek(0)

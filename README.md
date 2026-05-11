@@ -13,7 +13,7 @@ A smart dashboard that automatically tracks your customers across **Flipkart** (
 
 ### The Answer
 
-This dashboard **automatically** finds and tracks your customers across both channels, shows you conversion rates, revenue trends, and customer journeys — updating every 30 minutes without you lifting a finger.
+This dashboard **automatically** finds and tracks your customers across both channels, shows you conversion rates, revenue trends, and customer journeys — updating on a background schedule without you lifting a finger.
 
 No more manual spreadsheet hunting. No more guessing. Just real data about your real customers.
 
@@ -62,9 +62,9 @@ No more manual spreadsheet hunting. No more guessing. Just real data about your 
          (never saved to disk)
                     │
                     ▼
-         Send to Gemini AI Vision (OCR)
-         → Extract: name, email, phone, product,
-           order ID, invoice date, city, amount, platform
+             Send to Gemini Vision OCR
+             → Extract: name, email, phone, product,
+                order ID, invoice date, city, amount, platform
                     │
                     ▼
          Save structured data to local database
@@ -107,7 +107,7 @@ Every 30 minutes, the system does this automatically:
    - Updates all charts and reports
    - Shows you the insights in real-time
 
-**Scheduler** = Runs in the background, triggers a fresh sync every 30 minutes automatically
+**Scheduler** = Runs in the background, triggers a fresh sync on schedule and retries OCR jobs automatically when Gemini rate limits clear
 
 ---
 
@@ -169,8 +169,8 @@ You can retry failed invoices with one click.
 
 ### Automatic Everything
 
-- Syncs automatically every 30 minutes
-- Reads invoice photos/PDFs using AI
+- Syncs automatically on a background schedule
+- Reads invoice photos/PDFs using Gemini Vision OCR
 - Updates dashboard in real-time
 - Never processes the same file twice (smart caching)
 
@@ -182,10 +182,90 @@ You can retry failed invoices with one click.
 
 ### Security & Privacy
 
-- All data stored locally on your computer
-- Google credentials stored safely
-- Invoice files read in memory (never saved to disk)
-- No data sent to the cloud except to read the files
+ - All data stays on your computer (secure & private)
+ - Optional Multi‑OCR Mode (advanced): the project explored using multiple local OCR engines (for example, Tesseract, EasyOCR, PaddleOCR) as a fallback to reduce dependency on Gemini and improve throughput. However, enabling multi‑OCR requires installing and maintaining several native packages and models, increases deployment complexity, and usually needs significantly more CPU, memory, and disk (especially for large batches or PDF processing). For these reasons the repository defaults to Gemini Vision for OCR; multi‑OCR remains an opt‑in path for advanced users who can provision the required system resources and installation steps.
+
+---
+
+# 🧠 Architecture Decisions & Reliability Strategy
+
+## Why Gemini-Only OCR Was Chosen
+
+During development, a multi-model OCR architecture was explored using:
+- PaddleOCR
+- EasyOCR
+- Tesseract OCR
+
+The idea was to create a fully offline OCR fallback pipeline.
+
+However, after testing on real invoice datasets, the deployment tradeoffs became significant:
+
+### Issues with Local OCR
+
+- Heavy dependency installation
+- High CPU/RAM usage
+- Large model downloads
+- Windows compatibility issues
+- Slower processing on normal systems
+- Complex deployment for demos/interviews
+- Lower accuracy for marketplace attribution compared to Gemini Vision
+
+Since the project's primary OCR requirement was:
+- marketplace/source detection
+- seller identification
+- invoice attribution
+
+Gemini Vision provided significantly better results with a much simpler deployment experience.
+
+So the final production-style architecture intentionally uses:
+
+✅ Gemini Vision OCR  
+✅ Queue-based retry handling  
+✅ Incremental processing  
+✅ Heuristic attribution fallback  
+
+instead of maintaining multiple local OCR engines.
+
+This keeps the system:
+- lightweight
+- scalable
+- easier to deploy
+- more stable for real-world usage
+
+---
+
+## 🔁 Fallback Attribution Mechanism
+
+OCR is mainly used for:
+- identifying Flipkart/Amazon/D2C invoices
+- seller detection
+- source attribution
+
+However, the system is designed to continue functioning even if:
+- Gemini quota is exhausted
+- OCR fails
+- invoice quality is poor
+
+Instead of failing completely, the platform automatically switches to a heuristic fallback mechanism.
+
+### Fallback Logic
+
+If:
+- a warranty registration happens within a configurable 7–10 day buffer of a Shopify payment/order date
+AND
+- customer identifiers match using:
+  - email
+  - phone number
+  - fuzzy name similarity
+
+Then the system infers the customer as a:
+
+🟠 Probable D2C Customer
+
+This allows attribution and analytics to continue even during OCR/API failures.
+
+The goal was to ensure:
+OCR improves attribution confidence, but never becomes a single point of failure for the platform.
 
 ### Works with Real Data
 
@@ -248,14 +328,18 @@ That's it! The dashboard will start reading your data.
 
 ```
 GEMINI_API_KEY=your_key_here      # For invoice reading
+GEMINI_MODEL_NAME=gemini-2.0-flash # Free-tier Gemini vision model
 GOOGLE_SHEET_NAME=Your Sheet Name  # Name of Google Sheet to read
 SYNC_INTERVAL_MINUTES=30           # How often to sync (in minutes)
+OCR_RETRY_QUEUE_INTERVAL_SECONDS=900 # Retry pending invoices after cooldown
 ```
 
 **Use local Excel files instead of Google Sheets:**
 
 - Put Excel files in `sheets/` folder
 - System reads them automatically (no cloud needed)
+
+The OCR pipeline itself remains Gemini-only even when the sheet source is local.
 
 ---
 
@@ -269,9 +353,9 @@ SYNC_INTERVAL_MINUTES=30           # How often to sync (in minutes)
 
 ### Invoice reading stops?
 
-- You hit the Google Gemini free-tier limit (20 reads per day)
-- System automatically falls back to using just the Excel data
-- Use local Excel files instead of Google Drive links to avoid this
+- You hit the Google Gemini free-tier limit
+- The row is marked as `retry_pending` and picked up automatically after cooldown
+- If the invoice link is invalid, the system will keep the sheet data only and skip OCR
 
 ### Charts are empty?
 
@@ -317,6 +401,7 @@ dashborad/
 - No manual data entry needed
 - Works with Google Sheets OR local Excel files
 - All data stays on your computer (secure & private)
+- OCR retries are queued separately to keep Gemini usage stable
 
 **What you get:**
 

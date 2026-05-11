@@ -25,13 +25,29 @@ SYNC_TIMEOUT_SECONDS: int = int(os.getenv("SYNC_TIMEOUT_SECONDS", "3600"))  # 1 
 SYNC_MAX_RETRIES: int = int(os.getenv("SYNC_MAX_RETRIES", "3"))
 
 # ── OCR ─────────────────────────────────────────────────────────────────────
-MAX_OCR_CONCURRENCY: int = int(os.getenv("MAX_OCR_CONCURRENCY", "3"))
-OCR_RETRY_LIMIT: int = int(os.getenv("OCR_RETRY_LIMIT", "3"))
-OCR_DELAY_SECONDS: float = float(os.getenv("OCR_DELAY_SECONDS", "1.0"))
-OCR_TIMEOUT_SECONDS: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "30"))  # Max time per Gemini call
+MAX_OCR_CONCURRENCY: int = int(os.getenv("MAX_OCR_CONCURRENCY", "1"))
+OCR_RETRY_LIMIT: int = int(os.getenv("OCR_RETRY_LIMIT", "2"))
+GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
+# Delay between Gemini calls (free tier = ~15 req/min = 4s gap, be conservative)
+OCR_DELAY_SECONDS: float = float(os.getenv("OCR_DELAY_SECONDS", "4.0"))
+OCR_TIMEOUT_SECONDS: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "45"))  # Max time per Gemini call
 MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))  # Max file size in MB
 MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "5"))  # Process first N pages only
 ENABLE_DEBUG_DOWNLOADS: bool = os.getenv("ENABLE_DEBUG_DOWNLOADS", "false").lower() == "true"
+
+# Gemini quota recovery cooldown after hitting 429 errors.
+# After 3 consecutive 429s, wait this many seconds before retrying Gemini calls.
+# Free tier daily limit resets at midnight; 3600s = 1 hour default cooldown.
+GEMINI_QUOTA_COOLDOWN_SECONDS: int = int(os.getenv("GEMINI_QUOTA_COOLDOWN_SECONDS", "3600"))
+
+# How often (seconds) the retry queue checks for retry_pending items
+OCR_RETRY_QUEUE_INTERVAL_SECONDS: int = int(os.getenv("OCR_RETRY_QUEUE_INTERVAL_SECONDS", "900"))
+OCR_QUEUE_BATCH_SIZE: int = int(os.getenv("OCR_QUEUE_BATCH_SIZE", "2"))
+OCR_RETRY_BATCH_SIZE: int = int(os.getenv("OCR_RETRY_BATCH_SIZE", "1"))
+
+# ── Attribution ─────────────────────────────────────────────────────────────────
+# Days window for date-proximity fallback matching (warranty date ↔ Shopify order date)
+ATTRIBUTION_DATE_BUFFER_DAYS: int = int(os.getenv("ATTRIBUTION_DATE_BUFFER_DAYS", "7"))
 
 # ── API ──────────────────────────────────────────────────────────────────────
 BACKEND_PORT: int = int(os.getenv("BACKEND_PORT", "8000"))

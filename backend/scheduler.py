@@ -9,11 +9,11 @@ APScheduler setup with overlap prevention and timeout.
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
-from config import SYNC_INTERVAL_MINUTES, SYNC_TIMEOUT_SECONDS
+from config import SYNC_INTERVAL_MINUTES, SYNC_TIMEOUT_SECONDS, OCR_RETRY_QUEUE_INTERVAL_SECONDS
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
@@ -109,6 +109,55 @@ def start_scheduler():
         next_run_time=__import__("datetime").datetime.now(),
     )
 
+    # ── OCR Queue processor (default every 15 minutes) ───────────────────────
+    # We implement our own lock outside APScheduler to prevent the
+    # "maximum number of running instances reached" spam warnings.
+    _queue_lock = Lock()
+    _queue_running = [False]  # mutable container for closure
+
+    def _run_queue():
+        if _queue_running[0]:
+            # Previous run still active — silently skip (no APScheduler warning)
+            logger.debug("Queue worker already running — skipping this cycle")
+            return
+
+        with _queue_lock:
+            if _queue_running[0]:
+                return
+            _queue_running[0] = True
+
+        try:
+            from services.sync_service import process_ocr_queue
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process_ocr_queue())
+            loop.close()
+        except Exception as e:
+            logger.error(f"Queue processor error: {e}")
+        finally:
+            _queue_running[0] = False
+
+    # max_instances=1 + coalesce=True ensures APScheduler doesn't spawn extras
+    scheduler.add_job(
+        _run_queue,
+        "interval",
+        seconds=OCR_RETRY_QUEUE_INTERVAL_SECONDS,
+        id="ocr_queue_processor",
+        name="OCR Queue Processor",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Run the queue once shortly after startup so newly queued invoices begin
+    # processing without waiting for the first interval tick.
+    scheduler.add_job(
+        _run_queue,
+        id="initial_ocr_queue",
+        name="Initial OCR Queue Run",
+        next_run_time=datetime.now() + timedelta(seconds=10),
+    )
+
+
     # Then every N minutes
     scheduler.add_job(
         _run_sync,
@@ -123,7 +172,8 @@ def start_scheduler():
     scheduler.start()
     logger.info(
         f"Scheduler started — immediate sync triggered, "
-        f"then every {SYNC_INTERVAL_MINUTES} minutes (timeout: {SYNC_TIMEOUT_SECONDS}s)"
+        f"then every {SYNC_INTERVAL_MINUTES} minutes (timeout: {SYNC_TIMEOUT_SECONDS}s); "
+        f"OCR queue interval: {OCR_RETRY_QUEUE_INTERVAL_SECONDS}s"
     )
 
 
@@ -149,5 +199,5 @@ def get_sync_state() -> dict:
 
 def stop_scheduler():
     if scheduler.running:
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
         logger.info("Scheduler stopped")

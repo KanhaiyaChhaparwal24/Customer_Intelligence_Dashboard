@@ -38,7 +38,7 @@ function JourneyModal({ email, onClose }) {
               <div key={i} className="flex gap-3">
                 <div className="flex flex-col items-center">
                   <div
-                    className={`w-2.5 h-2.5 rounded-full mt-1 ${e.type === "warranty_registration" ? "bg-flipkart" : e.type === "flipkart_purchase" ? "bg-flipkart" : "bg-d2c"}`}
+                    className={`w-2.5 h-2.5 rounded-full mt-1 ${e.type === "warranty_registration" ? "bg-flipkart" : e.type === "marketplace_purchase" ? "bg-flipkart" : "bg-d2c"}`}
                   />
                   {i < data.events.length - 1 && (
                     <div className="w-px flex-1 bg-border mt-1" />
@@ -48,15 +48,15 @@ function JourneyModal({ email, onClose }) {
                   <div className="flex items-center justify-between">
                     <Badge
                       type={
-                        e.type === "flipkart_purchase"
+                        e.type === "marketplace_purchase"
                           ? "flipkart"
                           : e.type === "warranty_registration"
                             ? "flipkart"
                             : "d2c"
                       }
                     >
-                      {e.type === "flipkart_purchase"
-                        ? "Flipkart Purchase"
+                      {e.type === "marketplace_purchase"
+                        ? e.platform || "Marketplace"
                         : e.type === "warranty_registration"
                           ? "Warranty Registration"
                           : "D2C Order"}
@@ -69,8 +69,8 @@ function JourneyModal({ email, onClose }) {
                     {e.product ||
                       e.invoice_number ||
                       e.order_id ||
-                      (e.type === "flipkart_purchase"
-                        ? "Flipkart Purchase"
+                      (e.type === "marketplace_purchase"
+                        ? "Marketplace Purchase"
                         : "D2C Order")}
                   </p>
                   {e.amount !== undefined && e.amount !== null && (
@@ -111,15 +111,31 @@ export default function Converted() {
     },
     { key: "phone", label: "Phone", render: (v) => fmtPhone(v) },
     {
-      key: "product",
-      label: "FK Product",
-      render: (v, r) => truncate(r.product || v, 28),
+      key: "products",
+      label: "Products",
+      render: (v, r) => truncate((r.products || []).join(', ') || v, 28),
     },
-    { key: "size", label: "Size", render: (v) => v || "—" },
+    { key: "city", label: "City", render: (v, r) => r.city || "—" },
     {
-      key: "match_confidence",
+      key: "match_reason",
+      label: "Match Reason",
+      render: (v) => <span className="text-xs text-muted">{v || "—"}</span>,
+    },
+    {
+      key: "match_confidence_bucket",
       label: "Confidence",
-      render: (v) => <Badge type={v || "high"}>{v || "high"}</Badge>,
+      render: (v) => {
+        let color = "text-muted";
+        if (v === "High Confidence") color = "text-emerald-400";
+        else if (v === "Medium Confidence") color = "text-amber-400";
+        else if (v === "Weak Match") color = "text-orange-400";
+        return <span className={`text-xs ${color}`}>{v || "—"}</span>;
+      },
+    },
+    {
+      key: "source_inference_method",
+      label: "Source Inference",
+      render: (v) => <span className="text-xs text-muted">{v || "—"}</span>,
     },
     {
       key: "d2c_orders",

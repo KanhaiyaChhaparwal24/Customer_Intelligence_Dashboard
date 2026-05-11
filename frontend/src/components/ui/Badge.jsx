@@ -6,6 +6,7 @@ export function Badge({ type, children }) {
     success:   'badge-success',
     failed:    'badge-failed',
     pending:   'badge-pending',
+    retry_pending: 'badge-pending',
     retrying:  'badge badge-pending',
     processing:'badge badge-pending',
     high:      'badge bg-emerald-500/20 text-emerald-300',

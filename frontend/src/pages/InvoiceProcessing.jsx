@@ -36,12 +36,14 @@ export default function InvoiceProcessing() {
     { key: 'file_id',      label: 'File ID',    width: 180, render: (v) => <span className="text-muted text-[10px] font-mono">{v?.slice(0, 20)}…</span> },
     { key: 'row_number',   label: 'Sheet Row',  render: (v) => <span className="text-muted text-xs">#{v}</span> },
     { key: 'status',       label: 'Status',
-      render: (v) => (
-        v === 'success' ? <Badge type="success"><CheckCircle size={10} className="inline" /> Success</Badge>
-        : v === 'failed'  ? <Badge type="failed"><XCircle size={10} className="inline" /> Failed</Badge>
-        : v === 'retrying'? <Badge type="pending"><RefreshCw size={10} className="inline animate-spin" /> Retrying</Badge>
-        : <Badge type="pending"><Clock size={10} className="inline" /> {v || 'Pending'}</Badge>
-      )
+      render: (v) => {
+        const isSuccess = ['success', 'processed', 'cached', 'fallback-used'].includes(v);
+        if (isSuccess) return <Badge type="success"><CheckCircle size={10} className="inline" /> {v.replace('-', ' ')}</Badge>;
+        if (v === 'failed' || v === 'invalid') return <Badge type="failed"><XCircle size={10} className="inline" /> {v}</Badge>;
+        if (v === 'retrying' || v === 'retry_pending') return <Badge type="pending"><RefreshCw size={10} className="inline animate-spin" /> Retry Pending</Badge>;
+        if (v === 'processing') return <Badge type="processing"><Clock size={10} className="inline animate-spin" /> Processing</Badge>;
+        return <Badge type="pending"><Clock size={10} className="inline" /> {v || 'Pending'}</Badge>;
+      }
     },
     { key: 'processed_at', label: 'Processed At', render: (v) => fmtDate(v) },
     { key: '_actions',     label: 'Actions',
