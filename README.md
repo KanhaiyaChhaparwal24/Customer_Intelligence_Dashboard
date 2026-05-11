@@ -353,5 +353,3 @@ If something isn't working:
 5. Review the `.env` file for typos
 
 ---
-
-**Made for luggage brands selling on multiple channels. Designed to scale. No coding needed to use it.**
