@@ -345,16 +345,16 @@ def get_revenue_by_month(db: Session) -> List[Dict]:
     for o in orders:
         if o.created_at and o.total:
             try:
-                # Try common date formats
-                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
-                    try:
-                        dt = datetime.strptime(o.created_at[:len(fmt)], fmt)
-                        month_key = dt.strftime("%Y-%m")
-                        monthly[month_key] += o.total
-                        break
-                    except ValueError:
-                        continue
-            except Exception:
+                # Parse ISO format dates (handles timezones via fromisoformat)
+                date_str = str(o.created_at).strip()
+                # Handle format like "2025-09-13 21:40:12 +0530"
+                if ' +' in date_str or ' -' in date_str:
+                    date_str = date_str.replace(' +', '+').replace(' -', '-')
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                month_key = dt.strftime("%Y-%m")
+                monthly[month_key] += o.total
+            except Exception as e:
+                logger.debug(f"Failed to parse Shopify date '{o.created_at}': {e}")
                 pass
     return [{"month": k, "revenue": round(v, 2)} for k, v in sorted(monthly.items())]
 
@@ -365,14 +365,17 @@ def get_registrations_by_month(db: Session) -> List[Dict]:
     for r in rows:
         if r.timestamp:
             try:
-                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y %H:%M:%S"):
-                    try:
-                        dt = datetime.strptime(r.timestamp[:19], fmt)
-                        monthly[dt.strftime("%Y-%m")] += 1
-                        break
-                    except ValueError:
-                        continue
-            except Exception:
+                # Parse ISO format dates (handles both with and without microseconds)
+                date_str = str(r.timestamp).strip()
+                # Handle format like "2025-07-23 20:28:13.573000"
+                # Split by space to get just date + time (without timezone for warranty data)
+                if ' ' in date_str:
+                    date_str = date_str.split('+')[0].split('Z')[0].strip()
+                
+                dt = datetime.fromisoformat(date_str)
+                monthly[dt.strftime("%Y-%m")] += 1
+            except Exception as e:
+                logger.debug(f"Failed to parse warranty timestamp '{r.timestamp}': {e}")
                 pass
     return [{"month": k, "count": v} for k, v in sorted(monthly.items())]
 
@@ -443,7 +446,11 @@ def get_customer_journey(db: Session, email: str) -> Dict:
             except ValueError:
                 continue
         try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            # Convert to naive datetime (remove timezone info for consistent comparisons)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
         except Exception:
             return None
 
@@ -508,7 +515,27 @@ def get_customer_journey(db: Session, email: str) -> Dict:
     # ── Build timeline ──────────────────────────────────────────────────────
     events = []
     
-    # Add Flipkart purchases
+    # Track which warranty rows have Flipkart invoices to avoid duplicates
+    warranty_rows_with_invoices = set(fk_best_by_row.keys())
+    
+    # Add warranty registration events ONLY if no associated Flipkart invoice
+    if warranty_rows:
+        for wr in warranty_rows:
+            # Skip if this warranty row has a Flipkart invoice (will be shown as flipkart_purchase)
+            if wr.sheet_row_number in warranty_rows_with_invoices:
+                continue
+            
+            reg_date = _parse_date(wr.timestamp) if wr.timestamp else None
+            events.append({
+                "type": "warranty_registration",
+                "date": wr.timestamp or "",
+                "product": wr.warranty_product or "Warranty Registration",
+                "amount": None,
+                "platform": "Flipkart (Warranty)",
+                "invoice_number": None,
+            })
+    
+    # Add Flipkart purchases (from OCR of warranty invoice links)
     for inv in sorted(
         fk_best_by_row.values(),
         key=lambda item: (
@@ -543,7 +570,7 @@ def get_customer_journey(db: Session, email: str) -> Dict:
     events.sort(
         key=lambda item: (
             _parse_date(item.get("date")) or datetime.max,
-            0 if item.get("type") == "flipkart_purchase" else 1,
+            0 if item.get("type") == "warranty_registration" else (1 if item.get("type") == "flipkart_purchase" else 2),
         )
     )
     

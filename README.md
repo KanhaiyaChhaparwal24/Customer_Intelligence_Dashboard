@@ -1,28 +1,47 @@
-# 🧳 LuggageIQ — Customer Intelligence Dashboard
+# 🧳 Customer Intelligence Dashboard
 
-> A smart analytics system that automatically reads your warranty registrations and Shopify orders, reads customer invoices from Google Drive, and gives you a live dashboard showing who your customers are, where they came from, and who converted from Flipkart to your own website.
+## What Is This?
+
+A smart dashboard that automatically tracks your customers across **Flipkart** (your wholesale channel) and your **own website** (Shopify/D2C).
+
+### The Problem It Solves
+
+- You sell luggage on Flipkart AND your own website
+- Customers who buy from Flipkart fill out warranty forms
+- You have Shopify order data in a spreadsheet somewhere
+- **You want to know:** Who came from Flipkart and bought again from you? Which customers are your best repeat buyers? Which products and cities are winning?
+
+### The Answer
+
+This dashboard **automatically** finds and tracks your customers across both channels, shows you conversion rates, revenue trends, and customer journeys — updating every 30 minutes without you lifting a finger.
+
+No more manual spreadsheet hunting. No more guessing. Just real data about your real customers.
 
 ---
+
+## � What You Can See in the Dashboard
 
 ![Dashboard Preview](dash.png)
 
+### **Overview Page**
+
+- **Key Numbers**: How many customers converted, total revenue, repeat customers
+- **Charts**: Revenue trends, registration trends, top products, top cities, size & color preferences
+
+### **Converted Customers Page**
+
+- **Customer List**: See everyone who bought from both Flipkart AND your website
+- **Customer Journey**: Click on any customer to see their complete purchase history (warranty → Flipkart → your website)
+
+### **Segmentation Pages**
+
+- **Flipkart Only**: Customers who only bought from Flipkart (opportunity to convert)
+- **D2C Only**: New customers buying directly from your website
+- **All Customers**: Complete customer database with contact info and purchase data
+
 ---
 
-## 🤔 What Problem Does This Solve?
-
-Your brand sells luggage on **Flipkart** and your own **D2C website (Shopify)**.
-
-Customers who buy from Flipkart register their warranty using a QR code — and they upload their invoice as a photo or PDF to Google Drive.
-
-You also have your Shopify order data in a separate Google Sheet.
-
-**The question is:** *How many Flipkart buyers eventually came to your website and bought again? Who are the loyal repeat customers? Which products sell most? Which cities? What's your actual D2C revenue?*
-
-This dashboard answers all of that — automatically, every 30 minutes, without any manual effort.
-
----
-
-## 🔄 How It Works — The Complete Flow
+## 🔄 How It Works (Simple Version)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -68,36 +87,25 @@ This dashboard answers all of that — automatically, every 30 minutes, without 
          Dashboard updates automatically
 ```
 
----
+Every 30 minutes, the system does this automatically:
 
-## 🏗️ Architecture (Simple Version)
+1. **Read Your Data**
+   - Warranty registrations from your Google Sheets
+   - Shopify orders from your Google Sheets
+   - Invoice files from Google Drive links
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     YOUR COMPUTER                        │
-│                                                          │
-│  ┌──────────────┐      ┌────────────────────────────┐   │
-│  │   FRONTEND   │◄────►│       BACKEND (Python)     │   │
-│  │  React App   │      │       FastAPI Server        │   │
-│  │  Port 5173   │      │       Port 8000             │   │
-│  └──────────────┘      └─────────────┬──────────────┘   │
-│                                      │                   │
-│                              ┌───────▼──────┐            │
-│                              │   SQLite DB   │            │
-│                              │  (local file) │            │
-│                              └───────────────┘            │
-└─────────────────────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
-   Google Sheets              Gemini AI API
-   Google Drive               (OCR Processing)
-```
+2. **Extract Information**
+   - Uses AI to read invoice photos/PDFs
+   - Gets customer name, email, phone, product, amount, location, etc.
+   - Stores everything locally (no cloud storage needed)
 
-**Frontend** = What you see in the browser (charts, tables, KPI cards)
+3. **Match Customers**
+   - Finds customers who appear in BOTH Flipkart AND Shopify data
+   - Labels them as "Converted" customers
 
-**Backend** = The brain — reads Google data, processes invoices, runs matching, exposes an API
-
-**Database** = Stores all extracted invoice data and processed file IDs locally
+4. **Build Dashboard**
+   - Updates all charts and reports
+   - Shows you the insights in real-time
 
 **Scheduler** = Runs in the background, triggers a fresh sync every 30 minutes automatically
 
@@ -106,21 +114,23 @@ This dashboard answers all of that — automatically, every 30 minutes, without 
 ## 📊 What the Dashboard Shows
 
 ### Tab 1 — Overview
+
 The main page with everything at a glance:
 
-| Card | What it tells you |
-|---|---|
-| Flipkart Buyers | How many unique customers registered warranty (came from Flipkart) |
-| D2C Customers | How many unique customers ordered from your website |
-| Converted | Customers who did BOTH — bought on Flipkart AND your website |
-| Conversion Rate | % of Flipkart buyers who came back to D2C |
-| Total D2C Revenue | Sum of all Shopify orders |
-| Avg Order Value | Average amount per D2C order |
-| Repeat Customers | D2C customers who ordered more than once |
-| Pending OCRs | Invoices waiting to be read |
-| Failed OCRs | Invoices that couldn't be read (you can retry) |
+| Card              | What it tells you                                                  |
+| ----------------- | ------------------------------------------------------------------ |
+| Flipkart Buyers   | How many unique customers registered warranty (came from Flipkart) |
+| D2C Customers     | How many unique customers ordered from your website                |
+| Converted         | Customers who did BOTH — bought on Flipkart AND your website       |
+| Conversion Rate   | % of Flipkart buyers who came back to D2C                          |
+| Total D2C Revenue | Sum of all Shopify orders                                          |
+| Avg Order Value   | Average amount per D2C order                                       |
+| Repeat Customers  | D2C customers who ordered more than once                           |
+| Pending OCRs      | Invoices waiting to be read                                        |
+| Failed OCRs       | Invoices that couldn't be read (you can retry)                     |
 
 **Charts included:**
+
 - Customer segmentation donut (Converted vs FK-only vs D2C-only)
 - Warranty registrations by month
 - D2C revenue by month
@@ -131,156 +141,217 @@ The main page with everything at a glance:
 - Payment methods
 
 ### Tab 2 — Converted Customers
+
 A table of every customer who bought on Flipkart AND came back to your website.
 You can click **"View Journey"** to see their timeline: Flipkart purchase → D2C orders.
 
 ### Tab 3 — Flipkart Only
+
 Customers who registered warranty but haven't bought from your D2C site yet.
 These are your **retargeting audience**.
 
 ### Tab 4 — D2C Only
+
 Customers who found you directly without going through Flipkart first.
 
 ### Tab 5 — All Customers
+
 Every single customer in one unified searchable table with colour-coded source badges.
 
 ### Tab 6 — Invoice Processing
+
 A live log of every invoice file that was processed — success, failed, or pending.
 You can retry failed invoices with one click.
 
 ---
 
-## 🔌 What It Connects To
+## � Key Features
 
-| Service | What it does |
-|---|---|
-| **Google Sheets** | Reads warranty registrations (Tab 1) and Shopify orders (Tab 2) |
-| **Google Drive** | Opens invoice files linked in the sheet — images, PDFs, folders |
-| **Gemini AI (Vision)** | Reads the invoice image/PDF and extracts all the data |
-| **SQLite** | Stores all extracted data locally on your machine |
+### Automatic Everything
 
----
+- Syncs automatically every 30 minutes
+- Reads invoice photos/PDFs using AI
+- Updates dashboard in real-time
+- Never processes the same file twice (smart caching)
 
-## 🧠 Smart Features
+### Smart Matching
 
-### ✅ Never Re-Processes the Same Invoice
-Every Drive file has a unique ID. Once processed, it's saved — next sync skips it completely. Even if the same file appears in multiple rows or refreshes, it's only OCR'd once.
+- Finds customers by email or phone number
+- Fuzzy name matching as backup
+- Shows you exact conversion paths
 
-### ✅ Only Reads New Rows
-The system remembers the last sheet row it processed. On every sync, it only reads rows after that — so a sheet with 10,000 rows doesn't slow things down at all.
+### Security & Privacy
 
-### ✅ Handles Both File and Folder Links
-If a customer uploaded one image → reads that file.
-If they uploaded a whole folder → reads all files in the folder.
+- All data stored locally on your computer
+- Google credentials stored safely
+- Invoice files read in memory (never saved to disk)
+- No data sent to the cloud except to read the files
 
-### ✅ Column Name Flexibility
-If your sheet uses "Mobile" instead of "Phone", or "Invoice Link" instead of "Invoice Upload" — it still works. The system fuzzy-matches column names automatically.
+### Works with Real Data
 
-### ✅ Customer Matching
-Matches Flipkart customers to Shopify customers using:
-1. Exact email match
-2. Exact phone number match
-3. Name similarity (fuzzy match) as a fallback
-
-### ✅ Duplicate Detection
-If the same invoice or order ID appears twice, it's flagged automatically.
+- Handles thousands of customers
+- Processes hundreds of invoice files
+- Handles photos, PDFs, and folders
+- Flexible column names (auto-detects them)
 
 ---
 
-## 🚀 How to Start
+## 🚀 Quick Start
 
-### First Time Only
-You'll need to sign into Google once. A browser window will pop up automatically when you start the backend.
+### Step 1: Get Your Data Ready
 
-### Every Time
+Create a Google Sheet with two tabs:
 
-**Terminal 1 — Start the Backend:**
-```bash
+- **Tab 1**: Warranty Registrations (email, phone, product, warranty link to invoice)
+- **Tab 2**: Shopify Orders (order data from your D2C store)
+
+Or use local Excel files in the `sheets/` folder.
+
+### Step 2: Start the Dashboard
+
+**Open Terminal 1:**
+
+```
 cd e:\Coding\dashborad
 .\venv\Scripts\python -m uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir backend
 ```
 
-**Terminal 2 — Start the Frontend:**
-```bash
+**Open Terminal 2:**
+
+```
 cd e:\Coding\dashborad\frontend
 npm run dev
 ```
 
-**Then open:** http://localhost:5173
+**Then go to:** `http://localhost:5173`
+
+That's it! The dashboard will start reading your data.
 
 ---
 
-## 📁 Project Structure (Simple)
+## 📝 What You'll See
+
+| Page                    | What It Shows                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------------- |
+| **Overview**            | Total customers, revenue, conversion rate + 5 charts (trends, top products, cities, etc) |
+| **Converted Customers** | Everyone who bought from both Flipkart AND your website                                  |
+| **Flipkart Only**       | Customers who only bought from Flipkart (potential to convert)                           |
+| **D2C Only**            | New customers buying directly from you                                                   |
+| **All Customers**       | Complete database with emails, phones, and sources                                       |
+| **Invoice Processing**  | Log of all processed invoices with status                                                |
+
+---
+
+## ⚙️ How to Customize
+
+**Edit `.env` file** to change:
+
+```
+GEMINI_API_KEY=your_key_here      # For invoice reading
+GOOGLE_SHEET_NAME=Your Sheet Name  # Name of Google Sheet to read
+SYNC_INTERVAL_MINUTES=30           # How often to sync (in minutes)
+```
+
+**Use local Excel files instead of Google Sheets:**
+
+- Put Excel files in `sheets/` folder
+- System reads them automatically (no cloud needed)
+
+---
+
+## 🐛 Troubleshooting
+
+### Dashboard shows no data?
+
+- Check that your Google Sheet has data in Tab 1 and Tab 2
+- Wait for the next auto-sync (every 30 minutes) or click "Sync Now"
+- Check logs in backend terminal for errors
+
+### Invoice reading stops?
+
+- You hit the Google Gemini free-tier limit (20 reads per day)
+- System automatically falls back to using just the Excel data
+- Use local Excel files instead of Google Drive links to avoid this
+
+### Charts are empty?
+
+- Make sure warranty and Shopify data has valid dates
+- Check that emails/phones in both sheets match
+
+---
+
+## 📁 File Structure
 
 ```
 dashborad/
-│
-├── backend/                  ← Python FastAPI server
-│   ├── main.py               ← Server entry point
-│   ├── config.py             ← All settings (reads .env)
-│   ├── database.py           ← Database tables
-│   ├── auth.py               ← Google login
-│   ├── scheduler.py          ← Auto-sync every 30 min
-│   ├── services/
-│   │   ├── sheets_service.py ← Reads Google Sheets
-│   │   ├── drive_service.py  ← Opens Drive files
-│   │   ├── ocr_service.py    ← Gemini AI invoice reader
-│   │   ├── sync_service.py   ← Puts it all together
-│   │   └── analytics_service.py ← Calculates KPIs & charts
-│   └── api/
-│       ├── dashboard.py      ← Data endpoints for frontend
-│       └── invoices.py       ← Sync & retry controls
-│
-├── frontend/                 ← React web app
-│   └── src/
-│       ├── pages/            ← 6 dashboard tabs
-│       ├── components/       ← Charts, tables, cards
-│       └── utils/            ← API calls, formatting
-│
-├── database/
-│   └── intelligence.db       ← Local SQLite database (auto-created)
-│
-├── credentials.json          ← Google OAuth credentials
-├── token.json                ← Auto-created after first login
-├── .env                      ← Your API keys & settings
-└── dash.png                  ← Dashboard screenshot
+├── backend/              ← Brain (Python)
+├── frontend/             ← Interface (React)
+├── database/             ← Data storage (SQLite)
+├── sheets/               ← Your Excel files
+├── .env                  ← Your settings & API keys
+└── credentials.json      ← Google login (auto-created)
 ```
 
 ---
 
-## ⚙️ Settings (.env file)
+## 💡 In a Nutshell
 
-```env
-GEMINI_API_KEY=your_gemini_key_here
-GOOGLE_SHEET_NAME=Customer Data Sources Sample Structure
-SYNC_INTERVAL_MINUTES=30
-MAX_OCR_CONCURRENCY=3        # How many invoices to read at once
-OCR_RETRY_LIMIT=3            # How many times to retry a failed invoice
-ENABLE_DEBUG_DOWNLOADS=false # Keep false in production
-```
+**What it does:**
+
+- Reads your warranty registration data
+- Reads your Shopify order data
+- Uses AI to extract info from invoice photos/PDFs
+- Matches customers across both platforms
+- Shows you beautiful charts and insights
+
+**Why you need it:**
+
+- Know your conversion rate (Flipkart → D2C)
+- Identify your best repeat customers
+- Understand which products, cities, and categories are winning
+- Make data-driven decisions about inventory, marketing, and pricing
+
+**How it works:**
+
+- Runs automatically every 30 minutes
+- No manual data entry needed
+- Works with Google Sheets OR local Excel files
+- All data stays on your computer (secure & private)
+
+**What you get:**
+
+- Live dashboard with KPIs and charts
+- Customer segments (converted, Flipkart-only, D2C-only)
+- Customer journey timeline
+- Invoice processing status
+- All queryable and exportable data
 
 ---
 
-## 🎯 Expected Output
+## ✨ Current Status
 
-When real data is loaded (actual warranty registrations + Shopify orders):
+✅ **Working Features:**
 
-- Each Flipkart customer's invoice will be read and extracted
-- You'll see real numbers in the KPI cards
-- Charts will show your top cities, products, and revenue trends
-- Converted Customers tab shows who crossed from Flipkart to D2C
-- Invoice Processing tab shows every file with its status
-
-**Currently** — the sheet has sample/header data only, so all cards show `—`. Once real data is added to the Google Sheet, the next auto-sync (or click "Sync Now") will populate everything.
-
----
-
-## 🔐 Security Notes
-
-- Your Gemini API key **never** leaves the backend server
-- Invoice files are **never saved** to your computer — read in memory, processed, deleted
-- Google login token is stored locally in `token.json` — never shared
+- Dashboard with 6 pages
+- Real-time KPI calculations
+- Customer matching across Flipkart & D2C
+- Invoice reading with AI
+- Automatic syncing every 30 minutes
+- Journey timeline for converted customers
+- Revenue & registration charts by month
 
 ---
 
-*Built for production-scale use — designed to handle thousands of rows and hundreds of invoice files without breaking a sweat.*
+## 🆘 Need Help?
+
+If something isn't working:
+
+1. Check the backend terminal for error messages
+2. Make sure your Google Sheet has data
+3. Verify your API keys in `.env`
+4. Check that dates in your data are valid
+5. Review the `.env` file for typos
+
+---
+
+**Made for luggage brands selling on multiple channels. Designed to scale. No coding needed to use it.**

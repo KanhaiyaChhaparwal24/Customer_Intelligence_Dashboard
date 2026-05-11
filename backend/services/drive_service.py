@@ -48,6 +48,10 @@ def get_drive_service():
 def extract_drive_id(url: str) -> Optional[Dict]:
     """
     Parse any Google Drive URL and return {"type": "file"|"folder", "id": ...}.
+    Supports:
+      - File links: https://drive.google.com/file/d/{FILE_ID}/view
+      - Folder links: https://drive.google.com/drive/folders/{FOLDER_ID}
+      - Short forms with ?id= parameter
     Returns None if URL is invalid or not a Drive link.
     """
     if not url or not isinstance(url, str):
@@ -96,7 +100,11 @@ def stream_file_to_memory(file_id: str) -> Tuple[bytes, str, str]:
 
     filename = metadata.get("name", "unknown")
     mime_type = metadata.get("mimeType", "")
-    file_size_bytes = metadata.get("size", 0)
+    raw_size = metadata.get("size", 0)
+    try:
+        file_size_bytes = int(raw_size or 0)
+    except Exception:
+        file_size_bytes = 0
     max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
 
     # Pre-check file size to prevent OOM

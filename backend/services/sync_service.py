@@ -19,8 +19,9 @@ from database import (
 )
 from services.sheets_service import read_warranty_rows, read_shopify_rows
 from services.drive_service import extract_drive_id, stream_file_to_memory, list_folder_files
+from services.local_file_service import stream_local_file_to_memory
 from services.ocr_service import extract_invoice_data
-from config import ENABLE_DEBUG_DOWNLOADS
+from config import ENABLE_DEBUG_DOWNLOADS, USE_LOCAL_SHEETS, LOCAL_SHEETS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -127,67 +128,13 @@ async def _process_single_file(
         )
         stats["files_processed"] += 1
 
-        # Run OCR
-        extracted = await extract_invoice_data(file_bytes, mime_type, actual_name, file_id)
-
-        # Explicit memory release
-        del file_bytes
-
-        if not extracted:
-            _mark_file_processed(db, file_id, actual_name, row_number, "failed")
-            stats["ocr_failed"] += 1
-            return False
-
-        # ── Validity check ──────────────────────────────────────────────
-        validity = extracted.get("validity_score", {})
-        validity_status = validity.get("status", "unknown")
-        
-        if validity_status == "invalid":
-            logger.warning(
-                f"Row {row_number}: Invalid invoice ({actual_name}). "
-                f"Reasons: {validity.get('reasons')}. Skipping."
-            )
-            _mark_file_processed(db, file_id, actual_name, row_number, "invalid")
-            stats["ocr_failed"] += 1
-            return False
-        
-        # Store with validity info
-        is_dup = _detect_duplicates(db, extracted)
-        
+        result = await _process_bytes_file(db, file_id, actual_name, file_bytes, mime_type, row_number, stats)
+        # release memory
         try:
-            db.add(InvoiceExtraction(
-                file_id=file_id,
-                row_number=row_number,
-                customer_name=extracted.get("customer_name"),
-                email=extracted.get("email"),
-                phone=extracted.get("phone"),
-                order_id=extracted.get("order_id"),
-                invoice_number=extracted.get("invoice_number"),
-                invoice_date=extracted.get("invoice_date"),
-                product_title=extracted.get("product_title"),
-                size=extracted.get("size"),
-                colour=extracted.get("colour"),
-                grand_total=extracted.get("grand_total"),
-                seller_name=extracted.get("seller_name"),
-                billing_city=extracted.get("billing_city"),
-                billing_state=extracted.get("billing_state"),
-                shipping_city=extracted.get("shipping_city"),
-                shipping_state=extracted.get("shipping_state"),
-                platform=extracted.get("platform", "Unknown"),
-                is_duplicate=is_dup,
-                confidence=validity_status,  # Use validity status as confidence
-                extracted_at=datetime.utcnow(),
-            ))
-            db.commit()
-            _mark_file_processed(db, file_id, actual_name, row_number, "success")
-            stats["ocr_success"] += 1
-            return True
-        except Exception as db_err:
-            db.rollback()
-            logger.error(f"Failed to store extraction for {file_id}: {db_err}")
-            _mark_file_processed(db, file_id, actual_name, row_number, "failed")
-            stats["ocr_failed"] += 1
-            return False
+            del file_bytes
+        except Exception:
+            pass
+        return result
 
     except ValueError as ve:
         # File size limit or URL parsing error
@@ -215,32 +162,172 @@ async def _process_warranty_row(db: Session, row: Dict, stats: Dict) -> str:
             logger.debug(f"Row {row_number}: no invoice link, skipping")
             return "processed"
 
+        # 1) Drive-style link -> process via Drive
         drive_info = extract_drive_id(invoice_link)
-        if not drive_info:
-            logger.warning(f"Row {row_number}: invalid Drive link: {invoice_link}")
-            return "failed"
+        if drive_info:
+            if drive_info["type"] == "file":
+                file_id = drive_info["id"]
+                ok = await _process_single_file(db, file_id, "file", row_number, stats)
+                return "processed" if ok else "failed"
+            elif drive_info["type"] == "folder":
+                folder_id = drive_info["id"]
+                folder_ok = True
+                try:
+                    files = await asyncio.to_thread(list_folder_files, folder_id)
+                    logger.info(f"Row {row_number}: folder has {len(files)} files")
 
-        if drive_info["type"] == "file":
-            file_id = drive_info["id"]
-            await _process_single_file(db, file_id, "file", row_number, stats)
+                    for f in files:
+                        file_ok = await _process_single_file(db, f["id"], f["name"], row_number, stats)
+                        folder_ok = folder_ok and file_ok
+                except Exception as folder_err:
+                    logger.error(f"Row {row_number}: Error listing folder {folder_id}: {folder_err}")
+                    return "failed"
 
-        elif drive_info["type"] == "folder":
-            folder_id = drive_info["id"]
+            return "processed" if folder_ok else "failed"
+
+        # 2) If configured to use local sheets, treat invoice_link as filename
+        if USE_LOCAL_SHEETS:
             try:
-                files = await asyncio.to_thread(list_folder_files, folder_id)
-                logger.info(f"Row {row_number}: folder has {len(files)} files")
-
-                for f in files:
-                    await _process_single_file(db, f["id"], f["name"], row_number, stats)
-            except Exception as folder_err:
-                logger.error(f"Row {row_number}: Error listing folder {folder_id}: {folder_err}")
+                file_bytes, mime_type, actual_name = await asyncio.to_thread(
+                    stream_local_file_to_memory, LOCAL_SHEETS_DIR, invoice_link
+                )
+                local_id = f"local:{actual_name}"
+                stats["files_processed"] += 1
+                await asyncio.to_thread(lambda: None)  # yield
+                ok = await _process_bytes_file(db, local_id, actual_name, file_bytes, mime_type, row_number, stats)
+                return "processed" if ok else "failed"
+            except ValueError as lf_err:
+                logger.warning(f"Row {row_number}: local file not found: {lf_err}")
                 return "failed"
 
-        return "processed"
+        logger.warning(f"Row {row_number}: invalid Drive link and no local file: {invoice_link}")
+        return "failed"
 
     except Exception as e:
         logger.error(f"Row {row_number} processing error: {e}", exc_info=True)
         return "failed"
+
+
+async def _process_bytes_file(
+    db: Session,
+    file_id: str,
+    actual_name: str,
+    file_bytes: bytes,
+    mime_type: str,
+    row_number: int,
+    stats: Dict,
+) -> bool:
+    """
+    Process already-read bytes: run OCR and store results. 
+    On OCR failure or quota hit, create Excel-only fallback extraction.
+    Shared between Drive/local flows.
+    """
+    try:
+        # Check OCR cache
+        if _is_file_cached(db, file_id):
+            logger.info(f"Cache hit: {actual_name} ({file_id}) — skipping OCR")
+            stats["files_skipped"] += 1
+            return True
+
+        extracted = await extract_invoice_data(file_bytes, mime_type, actual_name, file_id)
+
+        # If OCR fails (None), create Excel-only fallback
+        if not extracted:
+            logger.warning(
+                f"Row {row_number}: OCR failed for {actual_name}. "
+                f"Creating Excel-only fallback using warranty form data."
+            )
+            # Get the warranty row to extract fallback data
+            warranty_row = db.query(ProcessedRow).filter(ProcessedRow.sheet_row_number == row_number).first()
+            if warranty_row:
+                # Create minimal extraction from warranty form
+                extracted = {
+                    "customer_name": warranty_row.email or "Unknown",
+                    "email": warranty_row.email,
+                    "phone": warranty_row.phone,
+                    "order_id": None,
+                    "invoice_number": None,
+                    "invoice_date": warranty_row.timestamp,
+                    "product_title": warranty_row.warranty_product,
+                    "size": warranty_row.warranty_size,
+                    "colour": warranty_row.warranty_colour,
+                    "grand_total": None,
+                    "seller_name": warranty_row.warranty_brand,
+                    "billing_city": None,
+                    "billing_state": None,
+                    "shipping_city": None,
+                    "shipping_state": None,
+                    "platform": "Warranty_Registration",
+                    "validity_score": {
+                        "status": "excel_only",
+                        "score": 50,
+                        "reasons": ["ocr_failed_using_excel_data"],
+                    }
+                }
+            else:
+                logger.error(f"Row {row_number}: Could not find warranty row for fallback")
+                _mark_file_processed(db, file_id, actual_name, row_number, "failed")
+                stats["ocr_failed"] += 1
+                return False
+
+        validity = extracted.get("validity_score", {})
+        validity_status = validity.get("status", "unknown")
+        
+        # Only reject if genuinely invalid (not excel_only)
+        if validity_status == "invalid":
+            logger.warning(
+                f"Row {row_number}: Invalid invoice ({actual_name}). Reasons: {validity.get('reasons')}. Skipping."
+            )
+            _mark_file_processed(db, file_id, actual_name, row_number, "invalid")
+            stats["ocr_failed"] += 1
+            return False
+
+        is_dup = _detect_duplicates(db, extracted)
+        try:
+            db.add(InvoiceExtraction(
+                file_id=file_id,
+                row_number=row_number,
+                customer_name=extracted.get("customer_name"),
+                email=extracted.get("email"),
+                phone=extracted.get("phone"),
+                order_id=extracted.get("order_id"),
+                invoice_number=extracted.get("invoice_number"),
+                invoice_date=extracted.get("invoice_date"),
+                product_title=extracted.get("product_title"),
+                size=extracted.get("size"),
+                colour=extracted.get("colour"),
+                grand_total=extracted.get("grand_total"),
+                seller_name=extracted.get("seller_name"),
+                billing_city=extracted.get("billing_city"),
+                billing_state=extracted.get("billing_state"),
+                shipping_city=extracted.get("shipping_city"),
+                shipping_state=extracted.get("shipping_state"),
+                platform=extracted.get("platform", "Unknown"),
+                is_duplicate=is_dup,
+                confidence=validity_status,
+                extracted_at=datetime.utcnow(),
+            ))
+            db.commit()
+            _mark_file_processed(db, file_id, actual_name, row_number, "success")
+            
+            # Count as success even for excel_only (data is present)
+            if validity_status == "excel_only":
+                logger.info(f"Row {row_number}: Stored Excel-only extraction for {actual_name}")
+            
+            stats["ocr_success"] += 1
+            return True
+        except Exception as db_err:
+            db.rollback()
+            logger.error(f"Failed to store extraction for {file_id}: {db_err}")
+            _mark_file_processed(db, file_id, actual_name, row_number, "failed")
+            stats["ocr_failed"] += 1
+            return False
+
+    except Exception as e:
+        logger.error(f"Byte-processing error for {file_id}: {e}")
+        _mark_file_processed(db, file_id, actual_name, row_number, "failed")
+        stats["ocr_failed"] += 1
+        return False
 
 
 def _sync_shopify(db: Session) -> int:
@@ -351,7 +438,13 @@ async def sync_all() -> Dict:
     }
 
     try:
-        # ── 1. Warranty rows (incremental) ───────────────────────────────
+        # ── 1. Warranty rows (incremental, with upsert idempotency) ──────────────────────
+        # Reads new rows from Warranty sheet (Tab 0)
+        # For each row:
+        #   1. Upsert to ProcessedRow (update if exists, insert if not)
+        #   2. If invoice_link present: process via OCR (Drive file, folder, or local file)
+        #   3. On OCR failure or quota: use Excel-only fallback (create extraction from form data)
+        #   4. Commit with per-row fault isolation
         try:
             last_row = _get_last_processed_row(db)
             new_rows, total_rows = read_warranty_rows(last_row)
@@ -363,24 +456,40 @@ async def sync_all() -> Dict:
             for row in new_rows:
                 row_number = row["_row_number"]
 
-                # Insert row record with ALL fields from the warranty form
-                pr = ProcessedRow(
-                    sheet_row_number=row_number,
-                    timestamp=row.get("timestamp", ""),
-                    email=row.get("email", "").lower().strip() or None,
-                    phone=re.sub(r"\D", "", row.get("phone", ""))[-10:] or None,
-                    warranty_brand=row.get("brand"),
-                    warranty_product=row.get("product_name"),
-                    warranty_colour=row.get("colour"),
-                    warranty_size=row.get("size"),
-                    status="processing",
-                )
-                try:
+                # Upsert row record: check if already exists, update if so, insert otherwise
+                pr = db.query(ProcessedRow).filter(ProcessedRow.sheet_row_number == row_number).first()
+                if pr:
+                    # Update existing row
+                    pr.timestamp = row.get("timestamp", "")
+                    pr.email = row.get("email", "").lower().strip() or None
+                    pr.phone = re.sub(r"\D", "", row.get("phone", ""))[-10:] or None
+                    pr.warranty_brand = row.get("brand")
+                    pr.warranty_product = row.get("product_name")
+                    pr.warranty_colour = row.get("colour")
+                    pr.warranty_size = row.get("size")
+                    pr.status = "processing"
+                    logger.debug(f"Row {row_number}: Updated existing record")
+                else:
+                    # Insert new row
+                    pr = ProcessedRow(
+                        sheet_row_number=row_number,
+                        timestamp=row.get("timestamp", ""),
+                        email=row.get("email", "").lower().strip() or None,
+                        phone=re.sub(r"\D", "", row.get("phone", ""))[-10:] or None,
+                        warranty_brand=row.get("brand"),
+                        warranty_product=row.get("product_name"),
+                        warranty_colour=row.get("colour"),
+                        warranty_size=row.get("size"),
+                        status="processing",
+                    )
                     db.add(pr)
+                    logger.debug(f"Row {row_number}: Inserted new record")
+
+                try:
                     db.commit()
                 except Exception as row_insert_err:
                     db.rollback()
-                    logger.error(f"Row {row_number}: Failed to insert: {row_insert_err}")
+                    logger.error(f"Row {row_number}: Failed to upsert: {row_insert_err}")
                     stats["rows_failed"] += 1
                     continue
 

@@ -7,6 +7,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
 # ── Google ──────────────────────────────────────────────────────────────────
+# Google Sheet containing warranty (Tab 0) and Shopify (Tab 1) data
+# If using local XLSX files, this is ignored (see USE_LOCAL_SHEETS below)
 GOOGLE_SHEET_NAME: str = os.getenv(
     "GOOGLE_SHEET_NAME", "Customer Data Sources Sample Structure"
 )
@@ -63,3 +65,9 @@ COLUMN_MAPPING: dict = {
     "created_at":     ["Paid at", "Created at", "Order Date", "Date"],
     "payment_method": ["Payment Method", "Payment Gateway"],
 }
+
+# ── Local sheets support ────────────────────────────────────────────────────
+# When enabled: reads local XLSX files (Warranty_Registration_Data.xlsx, Shopify_Order_Data.xlsx)
+# When disabled: reads from Google Sheets using GOOGLE_SHEET_NAME (Tab 0 = Warranty, Tab 1 = Shopify)
+USE_LOCAL_SHEETS: bool = os.getenv("USE_LOCAL_SHEETS", "true").lower() == "true"
+LOCAL_SHEETS_DIR: str = os.path.join(_base, os.getenv("LOCAL_SHEETS_DIR", "sheets"))

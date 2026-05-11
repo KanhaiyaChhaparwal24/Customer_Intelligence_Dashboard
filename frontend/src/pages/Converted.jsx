@@ -38,7 +38,7 @@ function JourneyModal({ email, onClose }) {
               <div key={i} className="flex gap-3">
                 <div className="flex flex-col items-center">
                   <div
-                    className={`w-2.5 h-2.5 rounded-full mt-1 ${e.type === "flipkart_purchase" ? "bg-flipkart" : "bg-d2c"}`}
+                    className={`w-2.5 h-2.5 rounded-full mt-1 ${e.type === "warranty_registration" ? "bg-flipkart" : e.type === "flipkart_purchase" ? "bg-flipkart" : "bg-d2c"}`}
                   />
                   {i < data.events.length - 1 && (
                     <div className="w-px flex-1 bg-border mt-1" />
@@ -47,11 +47,19 @@ function JourneyModal({ email, onClose }) {
                 <div className="pb-3 flex-1">
                   <div className="flex items-center justify-between">
                     <Badge
-                      type={e.type === "flipkart_purchase" ? "flipkart" : "d2c"}
+                      type={
+                        e.type === "flipkart_purchase"
+                          ? "flipkart"
+                          : e.type === "warranty_registration"
+                            ? "flipkart"
+                            : "d2c"
+                      }
                     >
                       {e.type === "flipkart_purchase"
                         ? "Flipkart Purchase"
-                        : "D2C Order"}
+                        : e.type === "warranty_registration"
+                          ? "Warranty Registration"
+                          : "D2C Order"}
                     </Badge>
                     <span className="text-xs text-muted">
                       {fmtDate(e.date)}

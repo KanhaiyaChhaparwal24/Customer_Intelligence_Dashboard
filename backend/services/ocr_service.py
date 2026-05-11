@@ -143,7 +143,22 @@ def _score_invoice_validity(extracted: Dict) -> Dict[str, Any]:
     # Check mandatory fields
     has_order_id = bool(extracted.get("order_id"))
     has_invoice_number = bool(extracted.get("invoice_number"))
-    has_total = extracted.get("grand_total") and extracted.get("grand_total") > 0
+
+    def _to_float(value: Any) -> float:
+        try:
+            if value is None:
+                return 0.0
+            if isinstance(value, (int, float)):
+                return float(value)
+            cleaned = str(value).replace(",", "").strip()
+            if not cleaned:
+                return 0.0
+            return float(cleaned)
+        except Exception:
+            return 0.0
+
+    total_value = _to_float(extracted.get("grand_total"))
+    has_total = total_value > 0
     has_email = bool(extracted.get("email"))
     has_phone = bool(extracted.get("phone"))
     has_customer_name = bool(extracted.get("customer_name"))
@@ -185,7 +200,7 @@ def _score_invoice_validity(extracted: Dict) -> Dict[str, Any]:
         score -= 10
     
     # Verify reasonable amount (basic sanity check)
-    amount = extracted.get("grand_total", 0)
+    amount = total_value
     if amount and (amount < 10 or amount > 1000000):
         reasons.append(f"amount_out_of_range({amount})")
         score -= 10
@@ -317,11 +332,18 @@ async def extract_invoice_data(
                 err_str = str(e)
                 last_error = err_str
 
-                # Rate limit: exponential backoff
+                # Quota/Rate limit: fail immediately, don't retry or backoff
+                # This allows the system to gracefully degrade to Excel-only data
                 if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
-                    wait = min(60, (2 ** attempt) * 5)
-                    logger.warning(f"Rate limit hit for {filename}. Backing off {wait}s")
-                    await asyncio.sleep(wait)
+                    logger.warning(
+                        f"Gemini quota/rate limit hit for {filename}. "
+                        f"Skipping OCR. System will use Excel-only data. Error: {e}"
+                    )
+                    # Return None immediately — caller will use Excel fallback
+                    _refresh_today_stats()
+                    ocr_stats["total_calls"] += 1
+                    ocr_stats["failed"] += 1
+                    return None
                 else:
                     logger.error(f"OCR error for {filename} (attempt {attempt + 1}): {e}")
                     if attempt >= OCR_RETRY_LIMIT - 1:
